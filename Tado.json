@@ -1,0 +1,764 @@
+{
+  "name": "Chauffage",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -2224,
+        480
+      ],
+      "id": "da1c5414-474b-46b0-9c63-56a5dd1ae8eb",
+      "name": "Schedule Trigger1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst config = $('Configuration Tado').first().json;\n\nconst CLIENT_ID = config.CLIENT_ID;\nconst REFRESH_TOKEN = staticData.tado_refresh_token;\n\nif (!REFRESH_TOKEN) {\n  return [{\n    auth_ok: false,\n    auth_reason: 'missing_refresh_token'\n  }];\n}\n\ntry {\n  const authResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'https://login.tado.com/oauth2/token',\n    headers: {\n      'Content-Type': 'application/x-www-form-urlencoded',\n    },\n    body: `client_id=${encodeURIComponent(CLIENT_ID)}&grant_type=refresh_token&refresh_token=${encodeURIComponent(REFRESH_TOKEN)}`,\n  });\n\n  if (!authResponse.access_token) {\n    return [{\n      auth_ok: false,\n      auth_reason: 'no_access_token_returned'\n    }];\n  }\n\n  staticData.tado_access_token = authResponse.access_token;\n\n  if (authResponse.refresh_token) {\n    staticData.tado_refresh_token = authResponse.refresh_token;\n  }\n\n  return [{\n    auth_ok: true,\n    access_token: authResponse.access_token\n  }];\n\n} catch (error) {\n  return [{\n    auth_ok: false,\n    auth_reason: 'refresh_failed',\n    auth_error: error.message\n  }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        480
+      ],
+      "id": "02905f65-9ad1-4e9a-a3f1-a9aa99f11f31",
+      "name": "Tado Refresh Token"
+    },
+    {
+      "parameters": {
+        "url": "=https://my.tado.com/api/v2/homes/{{ $('Configuration Tado').first().json.HOME_ID }}/zones/{{ $('Configuration Tado').first().json.ZONE_ID }}/state",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$json.access_token}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1104,
+        304
+      ],
+      "id": "108cc556-c13e-4188-b493-8b62efd11c4b",
+      "name": "Lire état zone Tado"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.openWeatherMap",
+      "typeVersion": 1,
+      "position": [
+        -880,
+        304
+      ],
+      "id": "b9c8aba4-a453-4176-a055-0b325c8be550",
+      "name": "Lire météo",
+      "credentials": {
+        "openWeatherMapApi": {
+          "id": "",
+          "name": ""
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const tado = $('Lire état zone Tado').first().json;\nconst meteo = $('Lire météo').first().json;\n\nconst power = tado.setting?.power ?? 'OFF';\nconst tempInt = tado.sensorDataPoints?.insideTemperature?.celsius ?? null;\n\n// Si le chauffage est OFF, on considère une consigne mini à 5\nconst currentSetpoint = power === 'ON'\n  ? (tado.setting?.temperature?.celsius ?? 5)\n  : 5;\n\nconst tempExt = meteo.main?.temp ?? null;\n\nif (tempInt === null || tempExt === null) {\n  throw new Error(\"Température intérieure ou extérieure introuvable.\");\n}\n\nreturn [{\n  // --- DONNÉES TADO (Intérieur) ---\n  temp_interieure: tempInt,\n  humidite_interieure: tado.sensorDataPoints?.humidity?.percentage ?? null,\n  consigne_actuelle: currentSetpoint,\n  power_actuel: power,\n  \n  // --- DONNÉES MÉTÉO (Extérieur) ---\n  temp_exterieure: tempExt,\n  nuages_pourcent: meteo.clouds?.all ?? 0,\n  humidite_pourcent: meteo.main?.humidity ?? null,\n  vitesse_vent_ms: meteo.wind?.speed ?? null,\n  condition_meteo: meteo.weather?.[0]?.description ?? 'inconnu',\n  \n  // --- LEVER / COUCHER DU SOLEIL ---\n  // Conversion des timestamps (secondes) en heures lisibles (optionnel pour le debug visuel)\n  heure_lever_soleil: meteo.sys?.sunrise ? new Date(meteo.sys.sunrise * 1000).toLocaleTimeString('fr-FR') : null,\n  heure_coucher_soleil: meteo.sys?.sunset ? new Date(meteo.sys.sunset * 1000).toLocaleTimeString('fr-FR') : null\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        304
+      ],
+      "id": "4ccf92a5-7e75-4bc7-8a99-bb8fe58e7891",
+      "name": "Fusionner données"
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst data = $json;\nconst meteo = $('Lire météo').first().json;\nconst configLogement = $('Configuration Logement').first().json;\n\nconst now = new Date();\nconst hour = now.getHours();\nconst minute = now.getMinutes();\nconst month = now.getMonth() + 1;\nconst day = now.getDay();\n\nconst tempInt = Number(data.temp_interieure);\nconst tempExt = Number(data.temp_exterieure);\nconst currentSetpoint = Number(data.consigne_actuelle);\nconst powerActuel = data.power_actuel;\nconst humiditeInt = data.humidite_interieure !== undefined ? Number(data.humidite_interieure) : null; // NOUVEAU\n\n// Présence par défaut configurable\nconst presence = typeof data.presence === 'boolean'\n  ? data.presence\n  : Boolean(configLogement.DEFAULT_PRESENCE);\n\n// ==============================\n// 1. CONFIGURATION GÉNÉRALE\n// ==============================\n\nconst LAT = Number(configLogement.Lat);\nconst LON = Number(configLogement.Lon);\n\nconst WINDOW_AZIMUTH = Number(configLogement.AZIMUTH);\nconst AZIMUTH_TOLERANCE = Number(configLogement.AZIMUTH_TOLERANCE);\n\nconst TADO_MIN = Number(configLogement.Min_thérmostat);\nconst TADO_MAX = Number(configLogement.Max_thérmostat);\n\nconst THERMAL_INERTIA = Number(configLogement.THERMAL_INERTIA ?? 0.9);\n\nconst cloudCover = Number(meteo.clouds?.all ?? 0);\n\nconst MIN_DELTA_SETPOINT = Number(configLogement.MIN_DELTA_SETPOINT ?? 0.5);\nconst MIN_DELAY_MINUTES = Number(configLogement.MIN_DELAY_MINUTES ?? 25);\n\nconst OVERHEAT_LIMIT = Number(configLogement.OVERHEAT_LIMIT ?? 22.6);\nconst HARD_SUMMER_EXT_LIMIT = Number(configLogement.HARD_SUMMER_EXT_LIMIT ?? 25);\n\nconst WORKDAY_MORNING_HOUR = Number(configLogement.WORKDAY_MORNING_HOUR ?? 6);\nconst WEEKEND_MORNING_HOUR = Number(configLogement.WEEKEND_MORNING_HOUR ?? 8);\nconst EVENING_START_HOUR = Number(configLogement.EVENING_START_HOUR ?? 17);\nconst NIGHT_START_HOUR = Number(configLogement.NIGHT_START_HOUR ?? 22);\nconst LATE_NIGHT_START_HOUR = Number(configLogement.LATE_NIGHT_START_HOUR ?? 23);\n\nconst SUNSET_PREHEAT_WINDOW_MIN = Number(configLogement.SUNSET_PREHEAT_WINDOW_MIN ?? 90);\n\nconst SOLAR_BONUS_MAX = Number(configLogement.SOLAR_BONUS_MAX ?? 1.8);\nconst TREND_WEIGHT = Number(configLogement.TREND_WEIGHT ?? 0.35);\n\nconst MODE_OFF = Number(configLogement.MODE_OFF ?? 5);\nconst MODE_ECO_MIN = Number(configLogement.MODE_ECO_MIN ?? 6);\n\n// ==============================\n// 2. OUTILS\n// ==============================\n\nfunction clamp(v, min, max) {\n  return Math.max(min, Math.min(max, v));\n}\n\nfunction round1(v) {\n  return Math.round(v * 10) / 10;\n}\n\nfunction normalizeAngle(deg) {\n  let a = deg % 360;\n  if (a < 0) a += 360;\n  return a;\n}\n\nfunction angleInSector(angle, start, end) {\n  const a = normalizeAngle(angle);\n  const s = normalizeAngle(start);\n  const e = normalizeAngle(end);\n\n  if (s <= e) return a >= s && a <= e;\n  return a >= s || a <= e;\n}\n\nfunction formatTadoSetpoint(val) {\n  let v = clamp(val, TADO_MIN, TADO_MAX);\n\n  if (v < 15) {\n    v = Math.round(v);\n  } else {\n    v = Math.round(v * 2) / 2;\n  }\n\n  return clamp(v, TADO_MIN, TADO_MAX);\n}\n\nfunction getSeason(month) {\n  if ([12, 1, 2].includes(month)) return 'winter';\n  if ([3, 4, 5].includes(month)) return 'spring';\n  if ([6, 7, 8].includes(month)) return 'summer';\n  return 'autumn';\n}\n\nfunction isWeekend(day) {\n  return day === 0 || day === 6;\n}\n\n// On garde cette fonction car elle calcule la hauteur (élévation) et l'angle précis (azimut) du soleil à l'instant T\nfunction getSolarPosition(lat, lon, date) {\n  const rad = Math.PI / 180;\n  const days = (date.getTime() / 86400000) - 10957.5;\n\n  const L = (280.460 + 0.9856474 * days) % 360;\n  const g = ((357.528 + 0.9856003 * days) % 360) * rad;\n  const lambda = (L + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * rad;\n  const epsilon = (23.439 - 0.0000004 * days) * rad;\n\n  const alpha = Math.atan2(Math.cos(epsilon) * Math.sin(lambda), Math.cos(lambda));\n  const delta = Math.asin(Math.sin(epsilon) * Math.sin(lambda));\n\n  const GMST = (18.697374558 + 24.06570982441908 * days) % 24;\n  const H = (GMST * 15 + lon) * rad - alpha;\n  const phi = lat * rad;\n\n  const elevation = Math.asin(\n    Math.sin(phi) * Math.sin(delta) +\n    Math.cos(phi) * Math.cos(delta) * Math.cos(H)\n  );\n\n  let azimuth = Math.atan2(\n    Math.sin(H),\n    Math.cos(H) * Math.sin(phi) - Math.tan(delta) * Math.cos(phi)\n  );\n\n  return {\n    elevation: elevation / rad,\n    azimuth: normalizeAngle((azimuth / rad + 180))\n  };\n}\n\nfunction getSolarGainScore(solar, cloudCoverPercent, windowAzimuth, toleranceDeg) {\n  const azMin = windowAzimuth - toleranceDeg;\n  const azMax = windowAzimuth + toleranceDeg;\n\n  const sunFacingWindow = angleInSector(solar.azimuth, azMin, azMax);\n  const hasEnoughElevation = solar.elevation > 7;\n  const cloudFactor = clamp(1 - (cloudCoverPercent / 100), 0, 1);\n\n  if (!sunFacingWindow || !hasEnoughElevation) {\n    return {\n      sunFacingWindow,\n      hasEnoughElevation,\n      gainScore: 0\n    };\n  }\n\n  const elevationFactor = clamp((solar.elevation - 7) / 35, 0, 1);\n  const gainScore = elevationFactor * cloudFactor;\n\n  return {\n    sunFacingWindow,\n    hasEnoughElevation,\n    gainScore: clamp(gainScore, 0, 1)\n  };\n}\n\n// ==============================\n// 3. CONTEXTE\n// ==============================\n\nconst season = getSeason(month);\nconst weekend = isWeekend(day);\nconst morningStart = weekend ? WEEKEND_MORNING_HOUR : WORKDAY_MORNING_HOUR;\n\nlet phase = 'day';\nif (hour >= LATE_NIGHT_START_HOUR || hour < morningStart) {\n  phase = 'late_night';\n} else if (hour >= morningStart && hour < 9) {\n  phase = 'morning';\n} else if (hour >= 9 && hour < EVENING_START_HOUR) {\n  phase = 'day';\n} else if (hour >= EVENING_START_HOUR && hour < NIGHT_START_HOUR) {\n  phase = 'evening';\n} else {\n  phase = 'night';\n}\n\nconst solar = getSolarPosition(LAT, LON, now);\nconst solarInfo = getSolarGainScore(solar, cloudCover, WINDOW_AZIMUTH, AZIMUTH_TOLERANCE);\nconst solarGainScore = solarInfo.gainScore;\n\n// NOUVEAU : Utilisation des données directes d'OpenWeatherMap pour le coucher du soleil\nconst sunsetTimeMs = meteo.sys?.sunset ? meteo.sys.sunset * 1000 : 0;\nconst minutesBeforeSunset = sunsetTimeMs ? (sunsetTimeMs - now.getTime()) / 60000 : 0;\n\nconst isSunsetApproaching =\n  minutesBeforeSunset > 0 &&\n  minutesBeforeSunset <= SUNSET_PREHEAT_WINDOW_MIN;\n\nconst prevTempInt = staticData.prev_temp_int;\nconst prevTempTs = staticData.prev_temp_ts;\n\nlet tempTrendPerHour = 0;\nif (typeof prevTempInt === 'number' && typeof prevTempTs === 'number') {\n  const elapsedHours = (Date.now() - prevTempTs) / 3600000;\n  if (elapsedHours > 0.2 && elapsedHours < 6) {\n    tempTrendPerHour = (tempInt - prevTempInt) / elapsedHours;\n  }\n}\n\nstaticData.prev_temp_int = tempInt;\nstaticData.prev_temp_ts = Date.now();\n\nconst solarThermalBonus = solarGainScore * SOLAR_BONUS_MAX * THERMAL_INERTIA;\nconst effectiveIndoorTemp = tempInt + solarThermalBonus + (tempTrendPerHour * TREND_WEIGHT);\n\n// ==============================\n// 4. CONFORT CIBLE DYNAMIQUE\n// ==============================\n\nfunction getBaseComfortTarget(season, phase, weekend, presence) {\n  const tables = {\n    winter: {\n      late_night: presence ? 18.0 : 17.0,\n      morning: weekend ? 21.5 : 21.2,\n      day: presence ? 21.5 : 18.5,\n      evening: 21.5,\n      night: presence ? 19.0 : 17.5\n    },\n    spring: {\n      late_night: presence ? 17.8 : 17.0,\n      morning: weekend ? 21.0 : 20.8,\n      day: presence ? 21.0 : 18.0,\n      evening: 21.0,\n      night: presence ? 18.7 : 17.3\n    },\n    summer: {\n      late_night: 17.5,\n      morning: 20.0,\n      day: presence ? 20.5 : 18.0,\n      evening: 20.5,\n      night: 18.0\n    },\n    autumn: {\n      late_night: presence ? 18.0 : 17.1,\n      morning: weekend ? 21.3 : 21.0,\n      day: presence ? 21.2 : 18.3,\n      evening: 21.2,\n      night: presence ? 18.8 : 17.4\n    }\n  };\n\n  return tables[season][phase];\n}\n\nlet dynamicComfort = getBaseComfortTarget(season, phase, weekend, presence);\n\nif (tempExt <= 2) dynamicComfort += 0.3;\nif (tempExt <= -2) dynamicComfort += 0.2;\nif (tempExt >= 16) dynamicComfort -= 0.4;\nif (tempExt >= 20) dynamicComfort -= 0.4;\n\nif (solarGainScore >= 0.55) dynamicComfort -= 0.8;\nelse if (solarGainScore >= 0.30) dynamicComfort -= 0.4;\n\nif (isSunsetApproaching && solarGainScore > 0.15 && phase === 'day') {\n  dynamicComfort += 0.3;\n}\n\ndynamicComfort = clamp(dynamicComfort, 17.0, 22.0);\n\n// ==============================\n// 5. DÉCISION PRINCIPALE\n// ==============================\n\nconst scriptLastForcedOff = staticData.script_last_mode === 'OFF';\nlet target = currentSetpoint;\nlet targetMode = 'SETPOINT';\nlet reason = 'maintien';\n\nif (powerActuel === 'OFF' && !scriptLastForcedOff) {\n  target = MODE_OFF;\n  targetMode = 'MANUAL_OFF_RESPECTED';\n  reason = 'desactive_manuellement';\n} else {\n  if (tempExt >= HARD_SUMMER_EXT_LIMIT) {\n    target = MODE_ECO_MIN;\n    targetMode = 'ECO_MIN';\n    reason = 'ete_veille';\n  }\n\n  else if (effectiveIndoorTemp >= OVERHEAT_LIMIT) {\n    target = MODE_ECO_MIN;\n    targetMode = 'ECO_MIN';\n    reason = solarGainScore >= 0.25 ? 'surchauffe_solaire' : 'surchauffe';\n  }\n\n  else if (phase === 'late_night') {\n    if (effectiveIndoorTemp < 17.3) {\n      target = 18.0;\n      targetMode = 'SETPOINT';\n      reason = 'nuit_chauffe';\n    } else if (effectiveIndoorTemp >= 18.3) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'nuit_veille';\n    } else {\n      target = currentSetpoint;\n      targetMode = 'SETPOINT';\n      reason = 'nuit_maintien';\n    }\n  }\n\n  else if (phase === 'morning') {\n    const gap = dynamicComfort - effectiveIndoorTemp;\n\n    if (gap >= 1.6) {\n      target = 22.0;\n      reason = 'matin_rattrapage';\n    } else if (gap >= 0.9) {\n      target = 21.5;\n      reason = 'matin_chauffe';\n    } else if (gap >= 0.3) {\n      target = 20.5;\n      reason = 'matin_maintien_actif';\n    } else if (effectiveIndoorTemp >= dynamicComfort + 0.5) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'matin_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'matin_maintien';\n    }\n  }\n\n  else if (phase === 'day') {\n    const gap = dynamicComfort - effectiveIndoorTemp;\n\n    if (solarGainScore >= 0.60 && tempInt >= 20.0) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'jour_apport_solaire_fort';\n    } else if (solarGainScore >= 0.35 && gap <= 0.8) {\n      target = 19.5;\n      reason = 'jour_chauffe_reduite_soleil';\n    } else if (gap >= 1.5) {\n      target = 21.5;\n      reason = 'jour_chauffe_forte';\n    } else if (gap >= 0.8) {\n      target = 21.0;\n      reason = 'jour_chauffe';\n    } else if (gap >= 0.2) {\n      target = 20.0;\n      reason = isSunsetApproaching ? 'anticipation_fin_soleil' : 'jour_maintien_actif';\n    } else if (effectiveIndoorTemp >= dynamicComfort + 0.6) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'jour_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'jour_maintien';\n    }\n  }\n\n  else if (phase === 'evening') {\n    const gap = dynamicComfort - effectiveIndoorTemp;\n\n    if (gap >= 1.4) {\n      target = 21.5;\n      reason = 'soir_chauffe_forte';\n    } else if (gap >= 0.7) {\n      target = 21.0;\n      reason = 'soir_chauffe';\n    } else if (gap >= 0.2) {\n      target = 20.0;\n      reason = 'soir_maintien_actif';\n    } else if (effectiveIndoorTemp >= dynamicComfort + 0.5) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'soir_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'soir_maintien';\n    }\n  }\n\n  else {\n    if (effectiveIndoorTemp < 18.2) {\n      target = 18.5;\n      reason = 'nuit_tardive_chauffe';\n    } else if (effectiveIndoorTemp >= 19.0) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'nuit_tardive_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'nuit_tardive_maintien';\n    }\n  }\n}\n\nif (targetMode !== 'MANUAL_OFF_RESPECTED' && target > MODE_ECO_MIN) {\n  target = formatTadoSetpoint(target);\n}\n\nif (\n  staticData.script_turned_it_off === true &&\n  currentSetpoint <= MODE_ECO_MIN &&\n  tempInt >= 20.3 &&\n  solarGainScore > 0.15\n) {\n  target = MODE_ECO_MIN;\n  targetMode = 'ECO_MIN';\n  reason = 'inertie_post_veille';\n}\n\nif (tempTrendPerHour > 0.25 && tempInt >= dynamicComfort - 0.2 && target > MODE_ECO_MIN) {\n  target = Math.min(target, 19.5);\n  target = formatTadoSetpoint(target);\n  reason = 'montee_naturelle_temperature';\n}\n\nif (!presence && tempInt >= 19.2 && season !== 'winter') {\n  target = Math.min(target, 18.0);\n  if (target > MODE_ECO_MIN) {\n    target = formatTadoSetpoint(target);\n    targetMode = 'SETPOINT';\n  }\n  reason = 'absence_mode_eco';\n}\n\n// ==============================\n// 6. GESTION DE L'HUMIDITÉ\n// ==============================\n\nlet alertMessage = null;\nlet sendHumAlert = false;\n\nif (humiditeInt !== null) {\n  if (humiditeInt < 35) {\n    alertMessage = `🌵 L'air est trop sec chez toi (${humiditeInt}% d'humidité). Pense à utiliser un humidificateur ou étendre du linge !`;\n  } else if (humiditeInt > 65) {\n    alertMessage = `💧 L'air est trop humide chez toi (${humiditeInt}% d'humidité). Pense à aérer l'appartement 10 minutes !`;\n  }\n}\n\n// Anti-spam pour l'humidité : 1 alerte toutes les 12h maximum\nconst lastHumAlertTs = staticData.last_humidity_alert_ts || 0;\nconst hoursSinceLastHumAlert = (Date.now() - lastHumAlertTs) / 1000 / 3600;\n\nif (alertMessage && hoursSinceLastHumAlert >= 12) {\n  sendHumAlert = true;\n  staticData.last_humidity_alert_ts = Date.now();\n} else if (!alertMessage) {\n  // Réinitialise l'alerte si l'humidité est redevenue normale\n  staticData.last_humidity_alert_ts = 0;\n}\n\n// ==============================\n// 7. ANTI-SPAM\n// ==============================\n\nconst nowTs = Date.now();\nconst lastUpdateTs = staticData.last_tado_update_ts || 0;\nconst minutesSinceLastUpdate = (nowTs - lastUpdateTs) / 1000 / 60;\n\nconst targetChangedEnough = Math.abs(target - currentSetpoint) >= MIN_DELTA_SETPOINT\n  || (powerActuel === 'OFF' && targetMode !== 'MANUAL_OFF_RESPECTED');\n\nconst delayOk = minutesSinceLastUpdate >= MIN_DELAY_MINUTES;\n\nlet action = (targetChangedEnough && delayOk) ? 'UPDATE' : 'IGNORE';\n\nif (targetMode === 'MANUAL_OFF_RESPECTED') {\n  action = 'IGNORE';\n}\n\n// ==============================\n// 8. SORTIE ET MÉMORISATION\n// ==============================\n\nstaticData.script_turned_it_off = (targetMode === 'ECO_MIN' || target <= MODE_ECO_MIN);\nstaticData.script_last_mode = targetMode;\nstaticData.last_requested_target = target;\nstaticData.last_reason = reason;\n\nreturn [{\n  temp_interieure: tempInt,\n  temp_exterieure: tempExt,\n  humidite_interieure: humiditeInt, // Retourné pour le suivi\n  consigne_actuelle: currentSetpoint,\n  cible: target,\n  target_mode: targetMode,\n  reason,\n  action,\n  delayOk,\n  targetChangedEnough,\n  sendHumAlert, // True s'il faut alerter via Telegram\n  alertMessage, // Le texte de l'alerte\n  debug_solaire: {\n    soleil_face_fenetre: solarInfo.sunFacingWindow,\n    nuages: `${cloudCover}%`,\n    chauffage_solaire_actif: solarGainScore > 0.2,\n    elevation: `${round1(solar.elevation)}°`,\n    azimut: `${round1(solar.azimuth)}°`,\n    gain_solaire_score: round1(solarGainScore),\n    bonus_solaire_estime: round1(solarThermalBonus),\n    coucher_soleil_proche: isSunsetApproaching,\n    minutes_avant_coucher: Math.round(minutesBeforeSunset)\n  },\n  debug_thermique: {\n    saison: season,\n    week_end: weekend,\n    presence: presence,\n    phase_journee: phase,\n    confort_cible: round1(dynamicComfort),\n    temperature_effective: round1(effectiveIndoorTemp),\n    tendance_deg_par_heure: round1(tempTrendPerHour)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        304
+      ],
+      "id": "22daf819-8769-4424-8811-4eb81c4c94aa",
+      "name": "Décision chauffage"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "012d8a77-5f95-4d30-9bc2-69dd3bac1082",
+              "leftValue": "={{$json.action}}",
+              "rightValue": "UPDATE",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": "={{ false }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -224,
+        96
+      ],
+      "id": "6cf626e2-37b1-493c-94bd-5c20155693b1",
+      "name": "Action = UPDATE ?"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://my.tado.com/api/v2/homes/{{ $('Configuration Tado').first().json.HOME_ID }}/zones/{{ $('Configuration Tado').first().json.ZONE_ID }}/overlay",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$('Tado Refresh Token').first().json.access_token}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => {\n  const isOff = $json.target_mode === \"MANUAL_OFF_RESPECTED\" || $json.cible <= 5;\n\n  const body = {\n    setting: {\n      type: \"HEATING\",\n      power: isOff ? \"OFF\" : \"ON\"\n    },\n    termination: {\n      type: \"TADO_MODE\"\n    }\n  };\n\n  if (!isOff) {\n    body.setting.temperature = {\n      celsius: $json.cible\n    };\n  }\n\n  return body;\n})() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "60485fc3-651f-409c-9e1c-4afc35d732a5",
+      "name": "Appliquer overlay Tado"
+    },
+    {
+      "parameters": {
+        "jsCode": "const decision = $('Décision chauffage').first().json;\nconst staticData = $getWorkflowStaticData('global');\n\nstaticData.last_tado_update_ts = Date.now();\n\n// L'ASTUCE EST ICI : Le script note dans sa mémoire s'il vient d'éteindre le chauffage (cible = 5)\nstaticData.script_turned_it_off = (decision.cible <= 5);\n\nreturn [{\n  message: `Consigne mise à jour sur ${decision.cible}°C`,\n  cible: decision.cible,\n  reason: decision.reason\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "96ae932b-dad9-4505-9805-7f95e28fe78b",
+      "name": "Mémoriser update"
+    },
+    {
+      "parameters": {
+        "jsCode": "const decision = $('Décision chauffage').first().json;\n\nreturn [{\n  message: \"Aucune modification nécessaire\",\n  ...decision\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        144
+      ],
+      "id": "d21d039a-7789-4450-8612-dbfbe83a5946",
+      "name": "Aucune modification nécessaire"
+    },
+    {
+      "parameters": {
+        "jsCode": "const decision = $('Décision chauffage').first().json;\n\nreturn [{\n  timestamp: new Date().toISOString(),\n  temp_interieure: decision.temp_interieure,\n  temp_exterieure: decision.temp_exterieure,\n  consigne_actuelle: decision.consigne_actuelle,\n  cible: decision.cible,\n  target_mode: decision.target_mode,\n  action: decision.action,\n  reason: decision.reason,\n  delayOk: decision.delayOk,\n  targetChangedEnough: decision.targetChangedEnough,\n  debug_solaire: decision.debug_solaire,\n  debug_thermique: decision.debug_thermique\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        96
+      ],
+      "id": "a6a3d712-a223-4677-a239-7b07677cf799",
+      "name": "Journal décision"
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst config = $('Configuration Tado').first().json;\n\n// 1. On demande à Tado d'ouvrir une session d'autorisation\nconst response = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://login.tado.com/oauth2/device_authorize',\n  headers: {\n    'Content-Type': 'application/x-www-form-urlencoded',\n  },\n  body: `client_id=${encodeURIComponent(config.CLIENT_ID)}&scope=offline_access`,\n});\n\n// 2. L'arme secrète contre Telegram : on encode les tirets du bas en \"%5F\"\n// pour qu'il ne les transforme pas en italique !\nconst lienParfait = `https://login.tado.com/oauth2/device?user%5Fcode=${response.user_code}&client%5Fid=${config.CLIENT_ID}`;\n\n// 3. On sauvegarde dans la mémoire globale (au cas où)\nstaticData.tado_pending_device_code = response.device_code;\nstaticData.tado_pending_verification_url = lienParfait;\nstaticData.tado_device_code_created_at = Date.now();\n\n// 4. On envoie les infos à Telegram ET au dernier nœud du workflow\nreturn [{\n  recovery_needed: true,\n  verification_uri_complete: lienParfait, // Le lien encodé pour Telegram\n  user_code: response.user_code,\n  expires_in: response.expires_in,\n  interval: response.interval,\n  device_code: response.device_code // La donnée vitale pour le nœud d'échange final !\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1104,
+        496
+      ],
+      "id": "dc55dbe7-be81-4e88-9411-1fcbba35d544",
+      "name": "Demander nouveau device code"
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst config = $('Configuration Tado').first().json;\n\n// On va lire le code directement depuis le nœud qui l'a généré !\nconst deviceCode = $('Demander nouveau device code').first().json.device_code;\n\nif (!deviceCode) {\n  throw new Error('Aucun device_code trouvé dans le nœud précédent.');\n}\n\nconst tokenResponse = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://login.tado.com/oauth2/token',\n  headers: {\n    'Content-Type': 'application/x-www-form-urlencoded',\n  },\n  body: `client_id=${encodeURIComponent(config.CLIENT_ID)}&grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=${encodeURIComponent(deviceCode)}`,\n});\n\nif (!tokenResponse.refresh_token) {\n  throw new Error(\"Aucun refresh token reçu. L'autorisation n'a peut-être pas encore été validée sur le téléphone.\");\n}\n\n// On sauvegarde enfin les tokens finaux dans la mémoire globale pour les prochains mois !\nstaticData.tado_access_token = tokenResponse.access_token;\nstaticData.tado_refresh_token = tokenResponse.refresh_token;\n\nreturn [{\n  auth_ok: true,\n  access_token: tokenResponse.access_token,\n  message: 'Nouveaux tokens Tado enregistrés avec succès !'\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        496
+      ],
+      "id": "ba1ec043-049e-4ea5-ac4a-9eeab6249502",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8b100855-0fec-47a3-9e4e-e91ba4b69420",
+              "name": "TADO_EMAIL",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "80b3b11e-9946-46c4-97c0-db0602860072",
+              "name": "CLIENT_ID",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "3c9e9cf8-2a0d-4e14-9080-bcf776581971",
+              "name": "TADO_PASSWORD",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "f5c0ec08-5588-44b3-bdb5-508b76f76abd",
+              "name": "HOME_ID",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "712127e1-d466-49ae-a0a1-96cf72311ee6",
+              "name": "ZONE_ID",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "05627520-e04a-4677-9ec0-d1d834b06286",
+              "name": "ID_Telegram",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -2000,
+        480
+      ],
+      "id": "8ee1f7dd-db8a-479f-b891-4fe93b4016b8",
+      "name": "Configuration Tado"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"context\": {\n      \"url\": $json.verification_uri_complete,\n      \"email\": $('Configuration Tado').first().json.TADO_EMAIL,\n      \"password\": $('Configuration Tado').first().json.TADO_PASSWORD\n    },\n    \"code\": \"export default async ({ page, context }) => {\\n  const { url, email, password } = context;\\n  await page.goto(url, { waitUntil: 'networkidle2' });\\n  \\n  const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));\\n  const exists = async (sel) => (await page.$(sel)) !== null;\\n  \\n  for (let i = 0; i < 4; i++) {\\n    await wait(2500);\\n    \\n    if (await exists('#loginId')) {\\n      await page.type('#loginId', email, {delay: 50});\\n      await page.type('#password', password, {delay: 50});\\n      await Promise.all([\\n        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 }).catch(() => {}),\\n        page.click('form button.c-btn--primary')\\n      ]);\\n    } else if (await exists('#device-form')) {\\n      await Promise.all([\\n        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 8000 }).catch(() => {}),\\n        page.click('#device-form button.c-btn--primary')\\n      ]);\\n    } else {\\n      break;\\n    }\\n  }\\n  return { success: true };\\n};\"\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -880,
+        496
+      ],
+      "id": "78eef1ca-c4ec-4f31-9879-a2c55a9dfa19",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "36c6754e-b7d3-45d9-b887-19c64f9bc874",
+              "name": "Lat",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "6c8d3f28-0625-4581-951e-46deab431864",
+              "name": "Lon",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "4b042d2a-23fe-4307-aad1-b3bff01c4c13",
+              "name": "AZIMUTH",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "eff39b02-8056-4c39-89da-fee89d7b2e90",
+              "name": "AZIMUTH_TOLERANCE",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "f17b6280-652d-46a2-84b9-c5d8212a974d",
+              "name": "Min_thérmostat",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "eebc234b-dcc2-47f8-8221-0b028ecf5f37",
+              "name": "Max_thérmostat",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "67e9340d-fb15-4919-bd2e-4266ed517de1",
+              "name": "THERMAL_INERTIA",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "beb96593-d759-4f04-be27-9f10ba2c02f9",
+              "name": "MIN_DELTA_SETPOINT",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "f58ed393-220e-47a5-8a5b-796f511fa08d",
+              "name": "MIN_DELAY_MINUTES",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "3386ec3c-8644-4b11-a9dc-3b35376c37cd",
+              "name": "OVERHEAT_LIMIT",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "8d372d4f-6c1c-45fd-9259-ef1f42e6e7b3",
+              "name": "HARD_SUMMER_EXT_LIMIT",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "dd02ae76-cb1b-495a-9d8f-530e2a573256",
+              "name": "WORKDAY_MORNING_HOUR",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "db8dd7bb-9f8c-4dfe-b6a5-682902c03084",
+              "name": "WEEKEND_MORNING_HOUR",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "ab5fdcbb-b5d3-4112-b7ed-1524c67cb50c",
+              "name": "EVENING_START_HOUR",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "de4a2ffd-0dc5-438e-9aca-e2bfb15f4295",
+              "name": "NIGHT_START_HOUR",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "5e5b47f2-4c37-46d6-bf4b-adffa3a03769",
+              "name": "LATE_NIGHT_START_HOUR",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "7142be0e-36e9-4d6d-898e-f4c47612b4ae",
+              "name": "SUNSET_PREHEAT_WINDOW_MIN",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "76149e40-c6f1-49e4-b820-17290e279467",
+              "name": "SOLAR_BONUS_MAX",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "eb4bca1c-5ca0-4e16-8064-274c1114ec59",
+              "name": "TREND_WEIGHT",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "87d07c7c-1d9d-4b31-a6c7-ab5ed99af5ed",
+              "name": "MODE_OFF",
+              "value": null,
+              "type": "number"
+            },
+            {
+              "id": "253659d0-f410-4ade-90bb-3db64ff8018e",
+              "name": "MODE_ECO_MIN",
+              "value": null,
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1776,
+        480
+      ],
+      "id": "8838a08e-f7d7-4d18-82e1-7b3254db61a3",
+      "name": "Configuration Logement"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Configuration Tado').item.json.ID_Telegram }}",
+        "text": "=={{ $json.alertMessage }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        16,
+        416
+      ],
+      "id": "83f99bc2-ed80-4249-9ace-897f82e54e36",
+      "name": "Send a text message",
+      "webhookId": "",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": ""
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fd63a244-d85d-4b71-8628-ecc259f1b4a2",
+              "leftValue": "={{$json.auth_ok}}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1328,
+        400
+      ],
+      "id": "dea34683-6ac0-47c5-8051-933a25f763fd",
+      "name": "Vérification Token"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b4f44ccc-4125-400b-87d2-8dfeeaad84be",
+              "leftValue": "={{ $json.sendHumAlert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -208,
+        432
+      ],
+      "id": "2136b65d-0fc0-4ba8-ad06-adcec0e0d96c",
+      "name": "Humiditer"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Configuration Tado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tado Refresh Token": {
+      "main": [
+        [
+          {
+            "node": "Vérification Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire état zone Tado": {
+      "main": [
+        [
+          {
+            "node": "Lire météo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire météo": {
+      "main": [
+        [
+          {
+            "node": "Fusionner données",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fusionner données": {
+      "main": [
+        [
+          {
+            "node": "Décision chauffage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Décision chauffage": {
+      "main": [
+        [
+          {
+            "node": "Action = UPDATE ?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Humiditer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action = UPDATE ?": {
+      "main": [
+        [
+          {
+            "node": "Appliquer overlay Tado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Aucune modification nécessaire",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Appliquer overlay Tado": {
+      "main": [
+        [
+          {
+            "node": "Mémoriser update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mémoriser update": {
+      "main": [
+        [
+          {
+            "node": "Journal décision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aucune modification nécessaire": {
+      "main": [
+        [
+          {
+            "node": "Journal décision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Demander nouveau device code": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration Tado": {
+      "main": [
+        [
+          {
+            "node": "Configuration Logement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Tado Refresh Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration Logement": {
+      "main": [
+        [
+          {
+            "node": "Tado Refresh Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vérification Token": {
+      "main": [
+        [
+          {
+            "node": "Lire état zone Tado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Demander nouveau device code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Humiditer": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "db5e0ffd-0a9f-4d8a-8e8e-0096797f9582",
+  "meta": {
+    "instanceId": ""
+  },
+  "id": "KqJQShL9HyGgC9Vp",
+  "tags": []
+}
