@@ -57,12 +57,53 @@ JSON, connexions, syntaxe JavaScript et décisions simulées ont été contrôl�
 
 ## English
 
-Import [Tado.json](Tado.json) to run the 23-node n8n workflow. It adjusts one Tado zone using indoor measurements, weather, schedule, season, thermal trends and estimated solar gain. Telegram branches report persistent humidity issues and native Tado open-window events.
+n8n workflow that adjusts a Tado heating zone based on indoor temperature, weather, schedules and the season, with Telegram alerts for humidity and open windows.
 
-This update adds freshness checks, stepped setpoints from 6 to 25 °C, humidity confirmation and hysteresis, window eco mode, and alert state recorded only after Telegram acknowledges delivery. The workflow does not issue an OFF command and can respect manual OFF.
+### File
 
-Before activation, replace all `YOUR_...` values, configure housing coordinates and comfort settings, select OpenWeatherMap and Telegram credentials, and verify Browserless device-code authentication. Check the decision output before enabling real Tado writes.
+[Tado.json](Tado.json) contains the workflow's 23 nodes. The export is inactive and anonymized: it includes no pinned data, credential identifiers, session tokens or execution state.
 
-The schedule runs every 30 minutes. Shorter confirmation thresholds do not increase polling frequency. A Tado window signal is an inference; solar gain and wall temperature are estimates.
+### Changes
 
-Exports are inactive and contain no credentials, pinned data or runtime state. Local validation covers JSON, connections, JavaScript syntax and simulated decisions. Live services must be checked on the target instance.
+- Enhanced heating decisions: occupancy when available, trends based on distinct measurements, schedule anticipation, estimated solar gain and thermal inertia.
+- Freshness checks for Tado measurements and weather data.
+- Setpoints from 6 to 25 °C: 1 °C increments between 6 and 14 °C, then 0.5 °C increments from 15 °C. The code requests a setpoint in ON mode and respects manual OFF according to `RESPECT_MANUAL_OFF`.
+- Humidity: normal and critical thresholds, hysteresis, confirmation over multiple measurements, estimated dew point and comparison with outdoor air.
+- Open windows: native Tado signal, switch to the eco setpoint, a hold period and a Telegram alert with a configurable reminder.
+- Alert cooldowns are recorded only after Telegram confirms delivery.
+
+### Configuration
+
+1. Import `Tado.json` and leave the workflow inactive during configuration.
+2. In **Configuration Tado**, replace `YOUR_TADO_EMAIL`, `YOUR_TADO_PASSWORD`, `YOUR_CLIENT_ID`, `YOUR_HOME_ID`, `YOUR_ZONE_ID` and `YOUR_ID_TELEGRAM`.
+3. In **Configuration Logement**, enter `Lat` and `Lon` (neutral default values: `0`), window orientation, time zone and comfort settings.
+4. In **Lire météo**, replace `YOUR_CITY,COUNTRY_CODE` and select your OpenWeatherMap credentials.
+5. Select your bot credentials in both Telegram nodes.
+6. In **HTTP Request**, configure Browserless and replace `YOUR_BROWSERLESS_TOKEN`. This node handles Tado authentication through the device code flow.
+7. Check authentication, the zone's state and the output of **Décision chauffage** before running **Appliquer overlay Tado**, which can change the actual setpoint.
+8. Activate the workflow once you have checked the settings. The scheduler runs every 30 minutes.
+
+The workflow's static data stores tokens and the decision history in your instance. After a fresh import, the device code flow initializes authentication.
+
+### Main settings
+
+| Setting | Value | Purpose |
+|---|---:|---|
+| `Min_thérmostat` / `Max_thérmostat` | 6 / 25 | Setpoint limits |
+| `MIN_DELAY_MINUTES` | 25 | Delay between adjustments, except in emergencies |
+| `SENSOR_MAX_AGE_MINUTES` | 90 | Maximum age of sensor measurements |
+| `WEATHER_MAX_AGE_MINUTES` | 120 | Maximum age of weather data |
+| `HUMIDITY_LOW_PERCENT` / `HUMIDITY_HIGH_PERCENT` | 30 / 60 | Humidity thresholds |
+| `HUMIDITY_CRITICAL_LOW_PERCENT` / `HUMIDITY_CRITICAL_HIGH_PERCENT` | 25 / 70 | Critical thresholds |
+| `HUMIDITY_CONFIRM_MINUTES` | 30 | Anomaly confirmation period |
+| `HUMIDITY_REMINDER_HOURS` | 12 | Standard reminder interval |
+| `WINDOW_HOLD_MINUTES` | 15 | Hold period for the open-window signal |
+| `WINDOW_REMINDER_MINUTES` | 60 | Open-window reminder interval |
+
+Alert frequency depends on the scheduler: a confirmation period set to 5 minutes does not trigger a check every 5 minutes when the workflow runs every 30 minutes.
+
+### Limitations and validation
+
+Tado infers whether a window is open; its signal does not replace a contact sensor. Solar gain and wall temperature are estimates. Occupancy falls back to the configuration when no usable data is available.
+
+JSON, connections, JavaScript syntax and simulated decisions have been checked locally. Tado, weather, Browserless and Telegram services must be verified on the target installation.
