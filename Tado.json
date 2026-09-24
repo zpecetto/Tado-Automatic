@@ -1,5 +1,5 @@
 {
-  "name": "Chauffage",
+  "name": "Tado - Chauffage, humidité et fenêtres",
   "nodes": [
     {
       "parameters": {
@@ -15,10 +15,10 @@
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.3,
       "position": [
-        -2224,
-        480
+        -1360,
+        1168
       ],
-      "id": "e421eb28-6657-4610-98dd-84d6d1c5dc3e",
+      "id": "06711485-76ea-54ad-bac0-26e859d6eaf7",
       "name": "Schedule Trigger1"
     },
     {
@@ -28,10 +28,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -1552,
-        480
+        -688,
+        1168
       ],
-      "id": "e35fccc8-8a33-4268-93ef-5c100679fb7d",
+      "id": "1edf5175-459c-53ce-972d-dcef1052efa8",
       "name": "Tado Refresh Token"
     },
     {
@@ -46,61 +46,64 @@
             }
           ]
         },
-        "options": {}
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          },
+          "timeout": 20000
+        }
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        -1104,
-        304
+        -240,
+        992
       ],
-      "id": "149e947a-5e4c-4225-b7d0-f4c050605d00",
-      "name": "Lire état zone Tado"
+      "id": "27c02b09-e4cc-5609-943b-fb31386829d5",
+      "name": "Lire état zone Tado",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "cityName": "villeurbanne,fr",
+        "cityName": "YOUR_CITY,COUNTRY_CODE",
         "language": "fr"
       },
       "type": "n8n-nodes-base.openWeatherMap",
       "typeVersion": 1,
       "position": [
-        -880,
-        304
+        -16,
+        992
       ],
-      "id": "af55bb6d-7af7-45e8-bf00-04695b0943c9",
+      "id": "692fa5af-05cd-59af-9266-4e9194ca64ba",
       "name": "Lire météo",
-      "credentials": {
-        "openWeatherMapApi": {
-          "id": "c66Oq0FpeSbmv0oa",
-          "name": "OpenWeatherMap account"
-        }
-      }
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "const tado = $('Lire état zone Tado').first().json;\nconst meteo = $('Lire météo').first().json;\n\nconst power = tado.setting?.power ?? 'OFF';\nconst tempInt = tado.sensorDataPoints?.insideTemperature?.celsius ?? null;\n\n// Si le chauffage est OFF, on considère une consigne mini à 5\nconst currentSetpoint = power === 'ON'\n  ? (tado.setting?.temperature?.celsius ?? 5)\n  : 5;\n\nconst tempExt = meteo.main?.temp ?? null;\n\nif (tempInt === null || tempExt === null) {\n  throw new Error(\"Température intérieure ou extérieure introuvable.\");\n}\n\nreturn [{\n  // --- DONNÉES TADO (Intérieur) ---\n  temp_interieure: tempInt,\n  humidite_interieure: tado.sensorDataPoints?.humidity?.percentage ?? null,\n  consigne_actuelle: currentSetpoint,\n  power_actuel: power,\n\n  // --- DÉTECTION FENÊTRE OUVERTE ---\n  // Compatibilité avec plusieurs variantes possibles du state Tado\n  window_open_detected: Boolean(\n    (tado.openWindow && tado.openWindow !== null) ||\n    tado.openWindowDetected === true ||\n    (typeof tado.openWindowDetected === 'object' && tado.openWindowDetected !== null)\n  ),\n  window_open_raw: tado.openWindow ?? tado.openWindowDetected ?? null,\n\n  // --- DONNÉES MÉTÉO (Extérieur) ---\n  temp_exterieure: tempExt,\n  nuages_pourcent: meteo.clouds?.all ?? 0,\n  humidite_pourcent: meteo.main?.humidity ?? null,\n  vitesse_vent_ms: meteo.wind?.speed ?? null,\n  condition_meteo: meteo.weather?.[0]?.description ?? 'inconnu',\n  condition_meteo_main: meteo.weather?.[0]?.main ?? 'Unknown',\n\n  // --- LEVER / COUCHER DU SOLEIL ---\n  heure_lever_soleil: meteo.sys?.sunrise\n    ? new Date(meteo.sys.sunrise * 1000).toLocaleTimeString('fr-FR')\n    : null,\n  heure_coucher_soleil: meteo.sys?.sunset\n    ? new Date(meteo.sys.sunset * 1000).toLocaleTimeString('fr-FR')\n    : null\n}];"
+        "jsCode": "// Keep missing measurements unknown. A failed weather request must not disable indoor control.\nconst store = $getWorkflowStaticData('global');\nconst housing = $('Configuration Logement').first().json;\nconst config = $('Configuration Tado').first().json;\nconst tadoResponse = $('Lire état zone Tado').first().json;\nconst weatherResponse = $('Lire météo').first().json;\nconst now = Date.now();\nconst key = `${config.HOME_ID}:${config.ZONE_ID}`;\nstore.climate_v2 ??= {};\nconst state = store.climate_v2[key] ??= {};\n\nfunction number(value, min, max) {\n  if (value === null || value === undefined || typeof value === 'boolean' || String(value).trim() === '') return null;\n  const n = Number(String(value).replace(',', '.'));\n  return Number.isFinite(n) && n >= min && n <= max ? n : null;\n}\nfunction timestamp(value) {\n  if (value === null || value === undefined || value === '') return null;\n  const n = typeof value === 'number' ? (value < 1e11 ? value * 1000 : value) : Date.parse(value);\n  return Number.isFinite(n) ? n : null;\n}\nconst maxSensorAge = number(housing.SENSOR_MAX_AGE_MINUTES, 5, 1440) ?? 90;\nconst maxWeatherAge = number(housing.WEATHER_MAX_AGE_MINUTES, 5, 1440) ?? 120;\nconst fresh = (ts, age) => ts !== null && ts <= now + 300000 && now - ts <= age * 60000;\nconst tado = tadoResponse.body ?? tadoResponse;\nconst apiOk = !tadoResponse.error && !!tado.sensorDataPoints && !['OFFLINE', 'DISCONNECTED'].includes(String(tado.link?.state).toUpperCase());\nconst inside = tado.sensorDataPoints?.insideTemperature;\nconst humidity = tado.sensorDataPoints?.humidity;\nconst insideTs = timestamp(inside?.timestamp);\nconst humidityTs = timestamp(humidity?.timestamp);\nconst temp = number(inside?.celsius, -10, 50);\nconst rh = number(humidity?.percentage, 1, 100);\n// Older API payloads sometimes omit timestamps; the successful read is then the only time reference.\nconst tempValid = apiOk && temp !== null && (insideTs === null || fresh(insideTs, maxSensorAge));\nconst humidityValid = apiOk && rh !== null && (humidityTs === null || fresh(humidityTs, maxSensorAge));\n\nconst weather = weatherResponse.body ?? weatherResponse;\nconst observationTs = timestamp(weather.dt);\nlet weatherSource = 'unavailable';\nif (!weatherResponse.error && number(weather.main?.temp, -60, 60) !== null && fresh(observationTs, maxWeatherAge)) {\n  state.weather = { value: weather, observedAt: observationTs };\n  weatherSource = 'current';\n} else if (state.weather && fresh(state.weather.observedAt, maxWeatherAge)) {\n  weatherSource = 'cached';\n}\nconst meteo = weatherSource === 'unavailable' ? {} : state.weather.value;\n\nfunction windowFlag(value) {\n  if (typeof value === 'boolean') return value;\n  if (value === 'true') return true;\n  if (value === 'false') return false;\n  if (!value || typeof value !== 'object') return null;\n  const expiry = timestamp(value.expiry ?? value.expiresAt ?? value.end);\n  if (expiry !== null && expiry <= now) return false;\n  for (const field of ['detected', 'isOpen', 'open', 'active']) {\n    if (typeof value[field] === 'boolean') return value[field];\n  }\n  if (['CLOSED', 'INACTIVE'].includes(value.state)) return false;\n  if (['OPEN', 'ACTIVE'].includes(value.state)) return true;\n  if (expiry !== null) return expiry > now;\n  const detectedAt = timestamp(value.detectedTime ?? value.detectedAt);\n  const duration = number(value.durationInSeconds, 1, 86400);\n  if (detectedAt !== null && duration !== null) return detectedAt <= now && now < detectedAt + duration * 1000;\n  // A settings object, an empty object or an undated event is not evidence of an open window.\n  return null;\n}\nconst flag = windowFlag(tado.openWindowDetected);\nconst overlayFlag = windowFlag(tado.openWindow);\nlet windowOpen = null;\nif (apiOk) {\n  if (flag === true || overlayFlag === true) windowOpen = true;\n  else if (flag === false || overlayFlag === false || tado.openWindow === null) windowOpen = false;\n}\nconst geo = ['HOME', 'AWAY'].includes(tado.geolocationOverride) ? tado.geolocationOverride : tado.tadoMode;\n\nreturn [{ json: {\n  zone_key: key,\n  fetched_at: now,\n  temp_interieure: tempValid ? temp : null,\n  humidite_interieure: humidityValid ? rh : null,\n  temperature_sample_ts: tempValid ? insideTs ?? now : null,\n  humidity_sample_ts: humidityValid ? humidityTs ?? now : null,\n  consigne_actuelle: number(tado.setting?.temperature?.celsius, 0, 40),\n  power_actuel: ['ON', 'OFF'].includes(tado.setting?.power) ? tado.setting.power : 'UNKNOWN',\n  tado_api_ok: apiOk,\n  presence: geo === 'HOME' ? true : geo === 'AWAY' ? false : null,\n  heating_power_percent: number(tado.activityDataPoints?.heatingPower?.percentage, 0, 100),\n  window_open_detected: windowOpen,\n  window_event_ts: timestamp(tado.openWindow?.detectedTime ?? tado.openWindowDetected?.detectedTime),\n  temp_exterieure: number(meteo.main?.temp, -60, 60),\n  humidite_pourcent: number(meteo.main?.humidity, 1, 100),\n  nuages_pourcent: number(meteo.clouds?.all, 0, 100),\n  vitesse_vent_ms: number(meteo.wind?.speed, 0, 80),\n  condition_meteo: meteo.weather?.[0]?.description ?? 'indisponible',\n  condition_meteo_main: meteo.weather?.[0]?.main ?? 'Unknown',\n  sunset_ts: timestamp(meteo.sys?.sunset),\n  quality: {\n    indoor_valid: tempValid,\n    humidity_valid: humidityValid,\n    sensor_timestamps_available: insideTs !== null && humidityTs !== null,\n    tado_rate_limit: tadoResponse.headers?.ratelimit ?? null,\n    weather_source: weatherSource,\n    weather_age_minutes: weatherSource === 'unavailable' ? null : Math.round((now - state.weather.observedAt) / 60000)\n  }\n} }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -656,
-        304
+        208,
+        992
       ],
-      "id": "df523639-8c9f-4b85-bf5f-4c8fb5d900b3",
+      "id": "654d00d9-e094-5905-a951-6db71b14735a",
       "name": "Fusionner données"
     },
     {
       "parameters": {
-        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst data = $json;\nconst meteo = $('Lire météo').first().json;\nconst configLogement = $('Configuration Logement').first().json;\n\nconst now = new Date();\nconst hour = now.getHours();\nconst minute = now.getMinutes();\nconst month = now.getMonth() + 1;\nconst day = now.getDay();\n\nconst tempInt = Number(data.temp_interieure);\nconst tempExt = Number(data.temp_exterieure);\nconst currentSetpoint = Number(data.consigne_actuelle);\nconst powerActuel = data.power_actuel;\nconst humiditeInt = data.humidite_interieure !== undefined ? Number(data.humidite_interieure) : null;\n\n// Fenêtre ouverte détectée depuis le node \"Fusionner données\"\nconst windowOpenDetected = Boolean(data.window_open_detected);\n\n// Météo enrichie pour les alertes humidité\nconst outsideHumidity = Number(meteo.main?.humidity ?? 0);\nconst windSpeed = Number(meteo.wind?.speed ?? 0);\nconst weatherMain = String(meteo.weather?.[0]?.main ?? '').toLowerCase();\nconst weatherDescription = String(meteo.weather?.[0]?.description ?? '').toLowerCase();\n\nconst isRainyLike =\n  ['rain', 'drizzle', 'thunderstorm'].includes(weatherMain) ||\n  weatherDescription.includes('pluie') ||\n  weatherDescription.includes('averse') ||\n  weatherDescription.includes('orage');\n\nconst isSnowLike =\n  weatherMain === 'snow' ||\n  weatherDescription.includes('neige');\n\n// Présence par défaut configurable\nconst presence = typeof data.presence === 'boolean'\n  ? data.presence\n  : Boolean(configLogement.DEFAULT_PRESENCE);\n\n// ==============================\n// 1. CONFIGURATION GÉNÉRALE\n// ==============================\n\nconst LAT = Number(configLogement.Lat);\nconst LON = Number(configLogement.Lon);\n\nconst WINDOW_AZIMUTH = Number(configLogement.AZIMUTH);\nconst AZIMUTH_TOLERANCE = Number(configLogement.AZIMUTH_TOLERANCE);\n\nconst TADO_MIN = Number(configLogement.Min_thérmostat);\nconst TADO_MAX = Number(configLogement.Max_thérmostat);\n\nconst THERMAL_INERTIA = Number(configLogement.THERMAL_INERTIA ?? 0.9);\n\nconst cloudCover = Number(meteo.clouds?.all ?? 0);\n\nconst MIN_DELTA_SETPOINT = Number(configLogement.MIN_DELTA_SETPOINT ?? 0.5);\nconst MIN_DELAY_MINUTES = Number(configLogement.MIN_DELAY_MINUTES ?? 25);\n\nconst OVERHEAT_LIMIT = Number(configLogement.OVERHEAT_LIMIT ?? 22.6);\nconst HARD_SUMMER_EXT_LIMIT = Number(configLogement.HARD_SUMMER_EXT_LIMIT ?? 25);\n\nconst WORKDAY_MORNING_HOUR = Number(configLogement.WORKDAY_MORNING_HOUR ?? 6);\nconst WEEKEND_MORNING_HOUR = Number(configLogement.WEEKEND_MORNING_HOUR ?? 8);\nconst EVENING_START_HOUR = Number(configLogement.EVENING_START_HOUR ?? 17);\nconst NIGHT_START_HOUR = Number(configLogement.NIGHT_START_HOUR ?? 22);\nconst LATE_NIGHT_START_HOUR = Number(configLogement.LATE_NIGHT_START_HOUR ?? 23);\n\nconst SUNSET_PREHEAT_WINDOW_MIN = Number(configLogement.SUNSET_PREHEAT_WINDOW_MIN ?? 90);\n\nconst SOLAR_BONUS_MAX = Number(configLogement.SOLAR_BONUS_MAX ?? 1.8);\nconst TREND_WEIGHT = Number(configLogement.TREND_WEIGHT ?? 0.35);\n\nconst MODE_OFF = Number(configLogement.MODE_OFF ?? 5);\nconst MODE_ECO_MIN = Number(configLogement.MODE_ECO_MIN ?? 6);\n\n// ==============================\n// 2. OUTILS\n// ==============================\n\nfunction clamp(v, min, max) {\n  return Math.max(min, Math.min(max, v));\n}\n\nfunction round1(v) {\n  return Math.round(v * 10) / 10;\n}\n\nfunction normalizeAngle(deg) {\n  let a = deg % 360;\n  if (a < 0) a += 360;\n  return a;\n}\n\nfunction angleInSector(angle, start, end) {\n  const a = normalizeAngle(angle);\n  const s = normalizeAngle(start);\n  const e = normalizeAngle(end);\n\n  if (s <= e) return a >= s && a <= e;\n  return a >= s || a <= e;\n}\n\nfunction formatTadoSetpoint(val) {\n  let v = clamp(val, TADO_MIN, TADO_MAX);\n\n  if (v < 15) {\n    v = Math.round(v);\n  } else {\n    v = Math.round(v * 2) / 2;\n  }\n\n  return clamp(v, TADO_MIN, TADO_MAX);\n}\n\nfunction getSeason(month) {\n  if ([12, 1, 2].includes(month)) return 'winter';\n  if ([3, 4, 5].includes(month)) return 'spring';\n  if ([6, 7, 8].includes(month)) return 'summer';\n  return 'autumn';\n}\n\nfunction isWeekend(day) {\n  return day === 0 || day === 6;\n}\n\nfunction getSolarPosition(lat, lon, date) {\n  const rad = Math.PI / 180;\n  const days = (date.getTime() / 86400000) - 10957.5;\n\n  const L = (280.460 + 0.9856474 * days) % 360;\n  const g = ((357.528 + 0.9856003 * days) % 360) * rad;\n  const lambda = (L + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * rad;\n  const epsilon = (23.439 - 0.0000004 * days) * rad;\n\n  const alpha = Math.atan2(Math.cos(epsilon) * Math.sin(lambda), Math.cos(lambda));\n  const delta = Math.asin(Math.sin(epsilon) * Math.sin(lambda));\n\n  const GMST = (18.697374558 + 24.06570982441908 * days) % 24;\n  const H = (GMST * 15 + lon) * rad - alpha;\n  const phi = lat * rad;\n\n  const elevation = Math.asin(\n    Math.sin(phi) * Math.sin(delta) +\n    Math.cos(phi) * Math.cos(delta) * Math.cos(H)\n  );\n\n  let azimuth = Math.atan2(\n    Math.sin(H),\n    Math.cos(H) * Math.sin(phi) - Math.tan(delta) * Math.cos(phi)\n  );\n\n  return {\n    elevation: elevation / rad,\n    azimuth: normalizeAngle((azimuth / rad + 180))\n  };\n}\n\nfunction getSolarGainScore(solar, cloudCoverPercent, windowAzimuth, toleranceDeg) {\n  const azMin = windowAzimuth - toleranceDeg;\n  const azMax = windowAzimuth + toleranceDeg;\n\n  const sunFacingWindow = angleInSector(solar.azimuth, azMin, azMax);\n  const hasEnoughElevation = solar.elevation > 7;\n  const cloudFactor = clamp(1 - (cloudCoverPercent / 100), 0, 1);\n\n  if (!sunFacingWindow || !hasEnoughElevation) {\n    return {\n      sunFacingWindow,\n      hasEnoughElevation,\n      gainScore: 0\n    };\n  }\n\n  const elevationFactor = clamp((solar.elevation - 7) / 35, 0, 1);\n  const gainScore = elevationFactor * cloudFactor;\n\n  return {\n    sunFacingWindow,\n    hasEnoughElevation,\n    gainScore: clamp(gainScore, 0, 1)\n  };\n}\n\n// ==============================\n// 3. CONTEXTE\n// ==============================\n\nconst season = getSeason(month);\nconst weekend = isWeekend(day);\nconst morningStart = weekend ? WEEKEND_MORNING_HOUR : WORKDAY_MORNING_HOUR;\n\nlet phase = 'day';\nif (hour >= LATE_NIGHT_START_HOUR || hour < morningStart) {\n  phase = 'late_night';\n} else if (hour >= morningStart && hour < 9) {\n  phase = 'morning';\n} else if (hour >= 9 && hour < EVENING_START_HOUR) {\n  phase = 'day';\n} else if (hour >= EVENING_START_HOUR && hour < NIGHT_START_HOUR) {\n  phase = 'evening';\n} else {\n  phase = 'night';\n}\n\nconst solar = getSolarPosition(LAT, LON, now);\nconst solarInfo = getSolarGainScore(solar, cloudCover, WINDOW_AZIMUTH, AZIMUTH_TOLERANCE);\nconst solarGainScore = solarInfo.gainScore;\n\n// Utilisation des données directes d'OpenWeatherMap pour le coucher du soleil\nconst sunsetTimeMs = meteo.sys?.sunset ? meteo.sys.sunset * 1000 : 0;\nconst minutesBeforeSunset = sunsetTimeMs ? (sunsetTimeMs - now.getTime()) / 60000 : 0;\n\nconst isSunsetApproaching =\n  minutesBeforeSunset > 0 &&\n  minutesBeforeSunset <= SUNSET_PREHEAT_WINDOW_MIN;\n\nconst prevTempInt = staticData.prev_temp_int;\nconst prevTempTs = staticData.prev_temp_ts;\n\nlet tempTrendPerHour = 0;\nif (typeof prevTempInt === 'number' && typeof prevTempTs === 'number') {\n  const elapsedHours = (Date.now() - prevTempTs) / 3600000;\n  if (elapsedHours > 0.2 && elapsedHours < 6) {\n    tempTrendPerHour = (tempInt - prevTempInt) / elapsedHours;\n  }\n}\n\nstaticData.prev_temp_int = tempInt;\nstaticData.prev_temp_ts = Date.now();\n\nconst solarThermalBonus = solarGainScore * SOLAR_BONUS_MAX * THERMAL_INERTIA;\nconst effectiveIndoorTemp = tempInt + solarThermalBonus + (tempTrendPerHour * TREND_WEIGHT);\n\n// ==============================\n// 4. CONFORT CIBLE DYNAMIQUE\n// ==============================\n\nfunction getBaseComfortTarget(season, phase, weekend, presence) {\n  const tables = {\n    winter: {\n      late_night: presence ? 18.0 : 17.0,\n      morning: weekend ? 21.5 : 21.2,\n      day: presence ? 21.5 : 18.5,\n      evening: 21.5,\n      night: presence ? 19.0 : 17.5\n    },\n    spring: {\n      late_night: presence ? 17.8 : 17.0,\n      morning: weekend ? 21.0 : 20.8,\n      day: presence ? 21.0 : 18.0,\n      evening: 21.0,\n      night: presence ? 18.7 : 17.3\n    },\n    summer: {\n      late_night: 17.5,\n      morning: 20.0,\n      day: presence ? 20.5 : 18.0,\n      evening: 20.5,\n      night: 18.0\n    },\n    autumn: {\n      late_night: presence ? 18.0 : 17.1,\n      morning: weekend ? 21.3 : 21.0,\n      day: presence ? 21.2 : 18.3,\n      evening: 21.2,\n      night: presence ? 18.8 : 17.4\n    }\n  };\n\n  return tables[season][phase];\n}\n\nlet dynamicComfort = getBaseComfortTarget(season, phase, weekend, presence);\n\nif (tempExt <= 2) dynamicComfort += 0.3;\nif (tempExt <= -2) dynamicComfort += 0.2;\nif (tempExt >= 16) dynamicComfort -= 0.4;\nif (tempExt >= 20) dynamicComfort -= 0.4;\n\nif (solarGainScore >= 0.55) dynamicComfort -= 0.8;\nelse if (solarGainScore >= 0.30) dynamicComfort -= 0.4;\n\nif (isSunsetApproaching && solarGainScore > 0.15 && phase === 'day') {\n  dynamicComfort += 0.3;\n}\n\ndynamicComfort = clamp(dynamicComfort, 17.0, 22.0);\n\n// ==============================\n// 5. DÉCISION PRINCIPALE\n// ==============================\n\nconst scriptLastForcedOff = staticData.script_last_mode === 'OFF';\nlet target = currentSetpoint;\nlet targetMode = 'SETPOINT';\nlet reason = 'maintien';\n\nif (windowOpenDetected) {\n  target = MODE_ECO_MIN; // 6°C\n  targetMode = 'WINDOW_OPEN_ECO';\n  reason = 'fenetre_ouverte';\n}\nelse if (powerActuel === 'OFF' && !scriptLastForcedOff) {\n  target = MODE_OFF;\n  targetMode = 'MANUAL_OFF_RESPECTED';\n  reason = 'desactive_manuellement';\n} else {\n  if (tempExt >= HARD_SUMMER_EXT_LIMIT) {\n    target = MODE_ECO_MIN;\n    targetMode = 'ECO_MIN';\n    reason = 'ete_veille';\n  }\n\n  else if (effectiveIndoorTemp >= OVERHEAT_LIMIT) {\n    target = MODE_ECO_MIN;\n    targetMode = 'ECO_MIN';\n    reason = solarGainScore >= 0.25 ? 'surchauffe_solaire' : 'surchauffe';\n  }\n\n  else if (phase === 'late_night') {\n    if (effectiveIndoorTemp < 17.3) {\n      target = 18.0;\n      targetMode = 'SETPOINT';\n      reason = 'nuit_chauffe';\n    } else if (effectiveIndoorTemp >= 18.3) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'nuit_veille';\n    } else {\n      target = currentSetpoint;\n      targetMode = 'SETPOINT';\n      reason = 'nuit_maintien';\n    }\n  }\n\n  else if (phase === 'morning') {\n    const gap = dynamicComfort - effectiveIndoorTemp;\n\n    if (gap >= 1.6) {\n      target = 22.0;\n      reason = 'matin_rattrapage';\n    } else if (gap >= 0.9) {\n      target = 21.5;\n      reason = 'matin_chauffe';\n    } else if (gap >= 0.3) {\n      target = 20.5;\n      reason = 'matin_maintien_actif';\n    } else if (effectiveIndoorTemp >= dynamicComfort + 0.5) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'matin_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'matin_maintien';\n    }\n  }\n\n  else if (phase === 'day') {\n    const gap = dynamicComfort - effectiveIndoorTemp;\n\n    if (solarGainScore >= 0.60 && tempInt >= 20.0) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'jour_apport_solaire_fort';\n    } else if (solarGainScore >= 0.35 && gap <= 0.8) {\n      target = 19.5;\n      reason = 'jour_chauffe_reduite_soleil';\n    } else if (gap >= 1.5) {\n      target = 21.5;\n      reason = 'jour_chauffe_forte';\n    } else if (gap >= 0.8) {\n      target = 21.0;\n      reason = 'jour_chauffe';\n    } else if (gap >= 0.2) {\n      target = 20.0;\n      reason = isSunsetApproaching ? 'anticipation_fin_soleil' : 'jour_maintien_actif';\n    } else if (effectiveIndoorTemp >= dynamicComfort + 0.6) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'jour_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'jour_maintien';\n    }\n  }\n\n  else if (phase === 'evening') {\n    const gap = dynamicComfort - effectiveIndoorTemp;\n\n    if (gap >= 1.4) {\n      target = 21.5;\n      reason = 'soir_chauffe_forte';\n    } else if (gap >= 0.7) {\n      target = 21.0;\n      reason = 'soir_chauffe';\n    } else if (gap >= 0.2) {\n      target = 20.0;\n      reason = 'soir_maintien_actif';\n    } else if (effectiveIndoorTemp >= dynamicComfort + 0.5) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'soir_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'soir_maintien';\n    }\n  }\n\n  else {\n    if (effectiveIndoorTemp < 18.2) {\n      target = 18.5;\n      reason = 'nuit_tardive_chauffe';\n    } else if (effectiveIndoorTemp >= 19.0) {\n      target = MODE_ECO_MIN;\n      targetMode = 'ECO_MIN';\n      reason = 'nuit_tardive_veille';\n    } else {\n      target = currentSetpoint;\n      reason = 'nuit_tardive_maintien';\n    }\n  }\n}\n\nif (targetMode !== 'MANUAL_OFF_RESPECTED' && target > MODE_ECO_MIN) {\n  target = formatTadoSetpoint(target);\n}\n\nif (\n  staticData.script_turned_it_off === true &&\n  currentSetpoint <= MODE_ECO_MIN &&\n  tempInt >= 20.3 &&\n  solarGainScore > 0.15\n) {\n  target = MODE_ECO_MIN;\n  targetMode = 'ECO_MIN';\n  reason = 'inertie_post_veille';\n}\n\nif (tempTrendPerHour > 0.25 && tempInt >= dynamicComfort - 0.2 && target > MODE_ECO_MIN) {\n  target = Math.min(target, 19.5);\n  target = formatTadoSetpoint(target);\n  reason = 'montee_naturelle_temperature';\n}\n\nif (!presence && tempInt >= 19.2 && season !== 'winter') {\n  target = Math.min(target, 18.0);\n  if (target > MODE_ECO_MIN) {\n    target = formatTadoSetpoint(target);\n    targetMode = 'SETPOINT';\n  }\n  reason = 'absence_mode_eco';\n}\n\n// ==============================\n// 6. GESTION DE L'HUMIDITÉ\n// ==============================\n\nfunction getHumidityProfile(season, phase, tempExt, outsideHumidity, windSpeed, isRainyLike, isSnowLike) {\n  const baseProfiles = {\n    winter: {\n      idealMin: 35,\n      idealMax: 45,\n      warnLow: 30,\n      warnHigh: 55,\n      criticalLow: 27,\n      criticalHigh: 60\n    },\n    spring: {\n      idealMin: 40,\n      idealMax: 50,\n      warnLow: 35,\n      warnHigh: 58,\n      criticalLow: 30,\n      criticalHigh: 63\n    },\n    summer: {\n      idealMin: 45,\n      idealMax: 55,\n      warnLow: 40,\n      warnHigh: 60,\n      criticalLow: 35,\n      criticalHigh: 65\n    },\n    autumn: {\n      idealMin: 40,\n      idealMax: 50,\n      warnLow: 35,\n      warnHigh: 58,\n      criticalLow: 30,\n      criticalHigh: 63\n    }\n  };\n\n  const profile = { ...baseProfiles[season] };\n\n  // Hiver froid : air sec plus fréquent, mais humidité haute plus risquée\n  if (season === 'winter') {\n    if (tempExt <= 0) {\n      profile.warnLow -= 2;\n      profile.criticalLow -= 2;\n      profile.warnHigh -= 3;\n      profile.criticalHigh -= 3;\n    }\n\n    if (phase === 'night' || phase === 'late_night') {\n      profile.warnLow -= 1;\n    }\n  }\n\n  // Été chaud : moiteur plus gênante\n  if (season === 'summer' && tempExt >= 26) {\n    profile.warnHigh -= 2;\n    profile.criticalHigh -= 2;\n  }\n\n  // Météo très humide / pluvieuse : plus strict sur humidité haute\n  if (outsideHumidity >= 85 || isRainyLike) {\n    profile.warnHigh -= 2;\n    profile.criticalHigh -= 2;\n  }\n\n  // Neige / froid sec : on tolère un peu plus l'air sec\n  if (isSnowLike || (tempExt <= 2 && outsideHumidity <= 50)) {\n    profile.warnLow -= 1;\n    profile.criticalLow -= 1;\n  }\n\n  // Fort vent + froid : l'air intérieur se dessèche plus vite\n  if (windSpeed >= 8 && tempExt <= 8) {\n    profile.warnLow -= 1;\n  }\n\n  return profile;\n}\n\nfunction buildHumidityAdvice(status, severity, tempExt, outsideHumidity, windSpeed, isRainyLike, isSnowLike) {\n  if (status === 'too_humid') {\n    if (isRainyLike || outsideHumidity >= 85) {\n      return \"Dehors l'air est déjà humide : privilégie une aération courte, la VMC ou un déshumidificateur.\";\n    }\n    if (tempExt <= 8) {\n      return \"Bon moment pour aérer 5 à 10 minutes sans trop refroidir le logement.\";\n    }\n    return \"Tu peux aérer 10 minutes si l'air extérieur est plus sec, sinon privilégie la VMC.\";\n  }\n\n  if (status === 'too_dry') {\n    if (tempExt <= 5 || isSnowLike) {\n      return \"Avec le froid dehors, c'est assez classique : évite d'aérer trop longtemps et pense à humidifier légèrement l'air.\";\n    }\n    if (windSpeed >= 8) {\n      return \"Le vent accentue souvent l'assèchement de l'air intérieur.\";\n    }\n    return \"Tu peux humidifier légèrement l'air : linge à sécher, bol d'eau, ou humidificateur.\";\n  }\n\n  return \"\";\n}\n\nconst seasonLabels = {\n  winter: 'hiver',\n  spring: 'printemps',\n  summer: 'été',\n  autumn: 'automne'\n};\n\nlet alertMessage = null;\nlet sendHumAlert = false;\nlet humidityStatus = 'normal';\nlet humiditySeverity = 'none';\n\nconst humidityProfile = getHumidityProfile(\n  season,\n  phase,\n  tempExt,\n  outsideHumidity,\n  windSpeed,\n  isRainyLike,\n  isSnowLike\n);\n\nif (humiditeInt !== null) {\n  if (humiditeInt <= humidityProfile.criticalLow) {\n    humidityStatus = 'too_dry';\n    humiditySeverity = 'critical';\n    const advice = buildHumidityAdvice(humidityStatus, humiditySeverity, tempExt, outsideHumidity, windSpeed, isRainyLike, isSnowLike);\n    alertMessage = `🌵 Air très sec (${humiditeInt}%). En ${seasonLabels[season]}, vise plutôt ${humidityProfile.idealMin}-${humidityProfile.idealMax}%. ${advice}`;\n  } else if (humiditeInt < humidityProfile.warnLow) {\n    humidityStatus = 'too_dry';\n    humiditySeverity = 'warning';\n    const advice = buildHumidityAdvice(humidityStatus, humiditySeverity, tempExt, outsideHumidity, windSpeed, isRainyLike, isSnowLike);\n    alertMessage = `🌵 Air un peu trop sec (${humiditeInt}%). Zone confortable : ${humidityProfile.idealMin}-${humidityProfile.idealMax}%. ${advice}`;\n  } else if (humiditeInt >= humidityProfile.criticalHigh) {\n    humidityStatus = 'too_humid';\n    humiditySeverity = 'critical';\n    const advice = buildHumidityAdvice(humidityStatus, humiditySeverity, tempExt, outsideHumidity, windSpeed, isRainyLike, isSnowLike);\n    alertMessage = `💧 Air très humide (${humiditeInt}%). En ${seasonLabels[season]}, essaie de rester vers ${humidityProfile.idealMin}-${humidityProfile.idealMax}%. ${advice}`;\n  } else if (humiditeInt > humidityProfile.warnHigh) {\n    humidityStatus = 'too_humid';\n    humiditySeverity = 'warning';\n    const advice = buildHumidityAdvice(humidityStatus, humiditySeverity, tempExt, outsideHumidity, windSpeed, isRainyLike, isSnowLike);\n    alertMessage = `💧 Air un peu trop humide (${humiditeInt}%). Zone confortable : ${humidityProfile.idealMin}-${humidityProfile.idealMax}%. ${advice}`;\n  }\n}\n\n// Anti-spam intelligent :\n// - critique : rappel possible toutes les 6h\n// - warning : rappel possible toutes les 12h\n// - changement d'état : envoi immédiat\nconst lastHumAlertTs = staticData.last_humidity_alert_ts || 0;\nconst lastHumAlertKey = staticData.last_humidity_alert_key || '';\nconst currentHumAlertKey = `${humidityStatus}:${humiditySeverity}:${season}:${weatherMain}`;\nconst hoursSinceLastHumAlert = (Date.now() - lastHumAlertTs) / 1000 / 3600;\nconst cooldownHours = humiditySeverity === 'critical' ? 6 : 12;\n\nif (alertMessage) {\n  if (hoursSinceLastHumAlert >= cooldownHours || lastHumAlertKey !== currentHumAlertKey) {\n    sendHumAlert = true;\n    staticData.last_humidity_alert_ts = Date.now();\n    staticData.last_humidity_alert_key = currentHumAlertKey;\n  }\n} else {\n  staticData.last_humidity_alert_ts = 0;\n  staticData.last_humidity_alert_key = '';\n}\n\n// ==============================\n// 7. ANTI-SPAM\n// ==============================\n\nconst nowTs = Date.now();\nconst lastUpdateTs = staticData.last_tado_update_ts || 0;\nconst minutesSinceLastUpdate = (nowTs - lastUpdateTs) / 1000 / 60;\n\nconst targetChangedEnough = Math.abs(target - currentSetpoint) >= MIN_DELTA_SETPOINT\n  || (powerActuel === 'OFF' && targetMode !== 'MANUAL_OFF_RESPECTED');\n\nconst delayOk = minutesSinceLastUpdate >= MIN_DELAY_MINUTES;\n\nlet action = (targetChangedEnough && delayOk) ? 'UPDATE' : 'IGNORE';\n\nif (targetMode === 'MANUAL_OFF_RESPECTED') {\n  action = 'IGNORE';\n}\n\n// ==============================\n// 8. SORTIE ET MÉMORISATION\n// ==============================\n\nstaticData.script_turned_it_off = (targetMode === 'ECO_MIN' || target <= MODE_ECO_MIN);\nstaticData.script_last_mode = targetMode;\nstaticData.last_requested_target = target;\nstaticData.last_reason = reason;\n\nreturn [{\n  temp_interieure: tempInt,\n  temp_exterieure: tempExt,\n  humidite_interieure: humiditeInt,\n  consigne_actuelle: currentSetpoint,\n  cible: target,\n  target_mode: targetMode,\n  reason,\n  action,\n  delayOk,\n  targetChangedEnough,\n  sendHumAlert,\n  alertMessage,\n  window_open_detected: windowOpenDetected,\n  debug_solaire: {\n    soleil_face_fenetre: solarInfo.sunFacingWindow,\n    nuages: `${cloudCover}%`,\n    chauffage_solaire_actif: solarGainScore > 0.2,\n    elevation: `${round1(solar.elevation)}°`,\n    azimut: `${round1(solar.azimuth)}°`,\n    gain_solaire_score: round1(solarGainScore),\n    bonus_solaire_estime: round1(solarThermalBonus),\n    coucher_soleil_proche: isSunsetApproaching,\n    minutes_avant_coucher: Math.round(minutesBeforeSunset)\n  },\n  debug_thermique: {\n    saison: season,\n    week_end: weekend,\n    presence: presence,\n    phase_journee: phase,\n    confort_cible: round1(dynamicComfort),\n    temperature_effective: round1(effectiveIndoorTemp),\n    tendance_deg_par_heure: round1(tempTrendPerHour)\n  },\n  debug_humidite: {\n    statut: humidityStatus,\n    severite: humiditySeverity,\n    plage_ideale: `${humidityProfile.idealMin}-${humidityProfile.idealMax}%`,\n    seuil_bas_warning: humidityProfile.warnLow,\n    seuil_bas_critique: humidityProfile.criticalLow,\n    seuil_haut_warning: humidityProfile.warnHigh,\n    seuil_haut_critique: humidityProfile.criticalHigh,\n    humidite_exterieure: outsideHumidity,\n    vent_ms: windSpeed,\n    meteo: weatherMain || weatherDescription || 'unknown'\n  }\n}];"
+        "jsCode": "// Supervisory room setpoints: tado keeps control of the radiator valve.\n// No external modules, no network calls, and no OFF command.\nconst store = $getWorkflowStaticData('global');\nconst data = $json;\nconst config = $('Configuration Logement').first().json;\nconst now = Date.now();\nconst MINUTE = 60000;\nconst HOUR = 60 * MINUTE;\nstore.climate_v2 ??= {};\nconst state = store.climate_v2[data.zone_key] ??= {};\n\nfunction numeric(value) {\n  if (value === null || value === undefined || typeof value === 'boolean' || String(value).trim() === '') return null;\n  const n = Number(String(value).replace(',', '.'));\n  return Number.isFinite(n) ? n : null;\n}\nconst clamp = (n, min, max) => Math.min(max, Math.max(min, n));\nconst setting = (name, fallback, min, max) => clamp(numeric(config[name]) ?? fallback, min, max);\nconst enabled = (name, fallback) => typeof config[name] === 'boolean' ? config[name] : fallback;\nconst rounded = (n, digits = 2) => n === null || !Number.isFinite(n) ? null : Number(n.toFixed(digits));\nconst indoor = numeric(data.temp_interieure);\nconst outdoor = numeric(data.temp_exterieure);\nconst humidity = numeric(data.humidite_interieure);\nconst outsideHumidity = numeric(data.humidite_pourcent);\nconst current = numeric(data.consigne_actuelle);\nconst power = data.power_actuel;\nconst insideOk = data.tado_api_ok === true && indoor !== null && indoor >= -10 && indoor <= 50;\nconst humidityOk = data.tado_api_ok === true && humidity !== null && humidity > 0 && humidity <= 100;\nconst presence = typeof data.presence === 'boolean' ? data.presence : enabled('DEFAULT_PRESENCE', true);\nconst minSetpoint = setting('Min_thérmostat', 6, 6, 25);\nconst maxSetpoint = Math.max(minSetpoint, setting('Max_thérmostat', 25, 6, 25));\nconst allowed = [];\nfor (let n = 6; n <= 14; n++) if (n >= minSetpoint && n <= maxSetpoint) allowed.push(n);\nfor (let n = 15; n <= 25; n += 0.5) if (n >= minSetpoint && n <= maxSetpoint) allowed.push(n);\nif (!allowed.length) throw new Error('Aucun palier Tado autorisé entre les limites configurées.');\nconst quantize = value => allowed.reduce((best, n) => Math.abs(n - value) < Math.abs(best - value) - 1e-9 ? n : best, allowed[0]);\nconst eco = allowed[0];\nconst timezone = String(config.TIMEZONE ?? 'Europe/Paris');\nconst clock = new Intl.DateTimeFormat('en-GB', {\n  timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric',\n  hour: 'numeric', minute: 'numeric', weekday: 'short', hourCycle: 'h23'\n});\nfunction localContext(ts) {\n  const p = Object.fromEntries(clock.formatToParts(new Date(ts)).map(p => [p.type, p.value]));\n  const month = Number(p.month);\n  const hour = Number(p.hour) + Number(p.minute) / 60;\n  const weekend = p.weekday === 'Sat' || p.weekday === 'Sun';\n  const morning = setting(weekend ? 'WEEKEND_MORNING_HOUR' : 'WORKDAY_MORNING_HOUR', weekend ? 8 : 6, 0, 12);\n  const evening = setting('EVENING_START_HOUR', 17, 12, 22);\n  const night = setting('NIGHT_START_HOUR', 22, evening, 23.5);\n  const lateNight = setting('LATE_NIGHT_START_HOUR', 23, night, 24);\n  const phase = hour < morning || hour >= lateNight ? 'late_night' : hour < 9 ? 'morning' : hour < evening ? 'day' : hour < night ? 'evening' : 'night';\n  const season = [12, 1, 2].includes(month) ? 'winter' : [3, 4, 5].includes(month) ? 'spring' : [6, 7, 8].includes(month) ? 'summer' : 'autumn';\n  return { month, hour, weekend, phase, season };\n}\nconst context = localContext(now);\nconst comfortTable = {\n  winter: { late_night: 18, morning: 21.2, day: 21.5, evening: 21.5, night: 19 },\n  spring: { late_night: 17.8, morning: 20.8, day: 21, evening: 21, night: 18.7 },\n  summer: { late_night: 17.5, morning: 20, day: 20.5, evening: 20.5, night: 18 },\n  autumn: { late_night: 18, morning: 21, day: 21.2, evening: 21.2, night: 18.8 }\n};\nconst comfortOffset = setting('COMFORT_OFFSET_C', 0, -4, 3);\nconst awayTarget = setting('AWAY_TARGET_C', 17.5, 6, 22);\nfunction comfortAt(ctx) {\n  let value = comfortTable[ctx.season][ctx.phase] + comfortOffset;\n  if (ctx.weekend && ctx.phase === 'morning' && ctx.season !== 'summer') value += 0.2;\n  return presence ? clamp(value, 16, 22) : Math.min(value, awayTarget);\n}\nconst baseComfort = comfortAt(context);\n\n// Estimate the measured trend from distinct sensor samples, not from execution count.\nconst historyWindow = setting('TREND_WINDOW_MINUTES', 120, 30, 240) * MINUTE;\nstate.history = (Array.isArray(state.history) ? state.history : []).filter(p =>\n  Number.isFinite(p.ts) && Number.isFinite(p.temp) && p.ts <= now + MINUTE && p.ts >= now - historyWindow);\nconst sampleTs = numeric(data.temperature_sample_ts);\nif (insideOk && sampleTs !== null && !state.history.some(p => p.ts === sampleTs)) {\n  state.history.push({ ts: sampleTs, temp: indoor, window: data.window_open_detected === true });\n}\nstate.history.sort((a, b) => a.ts - b.ts);\nstate.history = state.history.slice(-64);\nconst trendPoints = state.history.filter(p => !p.window && p.ts > (state.window?.lastClearedAt ?? 0));\nlet trend = null;\nif (trendPoints.length >= 3 && trendPoints.at(-1).ts - trendPoints[0].ts >= 30 * MINUTE) {\n  const meanX = trendPoints.reduce((sum, p) => sum + (p.ts - now) / HOUR, 0) / trendPoints.length;\n  const meanY = trendPoints.reduce((sum, p) => sum + p.temp, 0) / trendPoints.length;\n  let covariance = 0, variance = 0;\n  for (const p of trendPoints) {\n    const dx = (p.ts - now) / HOUR - meanX;\n    covariance += dx * (p.temp - meanY);\n    variance += dx * dx;\n  }\n  if (variance > 0) trend = clamp(covariance / variance, -2, 2);\n}\n\n// Low-order astronomical estimate. Vertical-window incidence is an estimate, not measured solar heat.\nfunction solarPosition() {\n  const lat = numeric(config.Lat), lon = numeric(config.Lon);\n  if (lat === null || lon === null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;\n  const rad = Math.PI / 180;\n  const days = now / 86400000 - 10957.5;\n  const g = (357.528 + 0.9856003 * days) * rad;\n  const lambda = (280.460 + 0.9856474 * days + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * rad;\n  const epsilon = (23.439 - 0.0000004 * days) * rad;\n  const alpha = Math.atan2(Math.cos(epsilon) * Math.sin(lambda), Math.cos(lambda));\n  const delta = Math.asin(Math.sin(epsilon) * Math.sin(lambda));\n  const h = ((18.697374558 + 24.06570982441908 * days) * 15 + lon) * rad - alpha;\n  const phi = lat * rad;\n  const elevation = Math.asin(Math.sin(phi) * Math.sin(delta) + Math.cos(phi) * Math.cos(delta) * Math.cos(h));\n  const azimuth = (Math.atan2(Math.sin(h), Math.cos(h) * Math.sin(phi) - Math.tan(delta) * Math.cos(phi)) / rad + 540) % 360;\n  return { elevation: elevation / rad, azimuth };\n}\nconst solar = solarPosition();\nconst clouds = numeric(data.nuages_pourcent);\nconst wind = numeric(data.vitesse_vent_ms);\nlet solarScore = 0;\nif (solar && clouds !== null && solar.elevation > 5) {\n  const difference = Math.abs(((solar.azimuth - setting('AZIMUTH', 285, 0, 360) + 540) % 360) - 180);\n  if (difference <= setting('AZIMUTH_TOLERANCE', 45, 0, 90)) {\n    solarScore = Math.cos(solar.elevation * Math.PI / 180) * Math.cos(difference * Math.PI / 180) * (1 - clamp(clouds / 100, 0, 1));\n  }\n}\nlet weatherCorrection = 0;\nif (outdoor !== null && presence && !['night', 'late_night'].includes(context.phase)) {\n  weatherCorrection = outdoor < 8 ? clamp((8 - outdoor) / 20, 0, 0.5) : -clamp((outdoor - 16) / 12, 0, 0.5);\n  if (outdoor < 8 && wind !== null) weatherCorrection += clamp((wind - 4) / 40, 0, 0.15);\n  weatherCorrection = clamp(weatherCorrection, -0.5, 0.5);\n}\nlet comfort = clamp(baseComfort + weatherCorrection, eco, Math.min(22, maxSetpoint));\n// Anticipation is confined to a forthcoming higher schedule target.\nconst future = localContext(now + setting('PREHEAT_MINUTES', 45, 0, 90) * MINUTE);\nlet preheating = false;\nif (insideOk && presence && future.phase !== context.phase && comfortAt(future) > baseComfort && indoor < comfortAt(future) - 0.5 && (outdoor === null || outdoor < 16)) {\n  comfort = clamp(comfortAt(future), eco, Math.min(22, maxSetpoint));\n  preheating = true;\n}\nconst inertia = setting('THERMAL_INERTIA', 0.9, 0, 1);\nconst reductionLimit = setting('MAX_SOLAR_REDUCTION_C', 0.5, 0, 1);\nconst solarReduction = insideOk && indoor >= comfort - 0.3 && trend !== null && trend > 0.1 ? solarScore * reductionLimit * inertia : 0;\nconst trendReduction = insideOk && indoor >= comfort - 0.2 && trend !== null ? clamp(trend * (20 / 60) * inertia, 0, reductionLimit) : 0;\n// Do not count the same measured warming twice as both trend and solar heat.\nlet requested = comfort - Math.max(solarReduction, trendReduction);\nlet targetMode = preheating ? 'PREHEAT' : presence ? 'COMFORT' : 'AWAY';\nlet reason = preheating ? 'anticipation_horaire' : 'consigne_confort_stable';\n\n// Window episodes use only the native Tado signal; its disappearance is not proof of physical closure.\nstate.window ??= { active: false };\nconst window = state.window;\nconst wasWindowActive = window.active === true;\nconst nativeWindow = data.window_open_detected;\nif (data.tado_api_ok && nativeWindow === true) {\n  if (!window.active) {\n    window.openedAt = now;\n    window.episodeId = `${now}`;\n  }\n  window.active = true;\n  window.lastPositiveAt = now;\n  window.lastKnownAt = now;\n} else if (data.tado_api_ok && nativeWindow === false) {\n  window.lastKnownAt = now;\n  if (window.active && now - window.openedAt >= setting('WINDOW_HOLD_MINUTES', 15, 0, 60) * MINUTE) {\n    window.active = false;\n    window.lastClearedAt = now;\n  }\n} else if (window.active && now - (window.lastPositiveAt ?? 0) > setting('WINDOW_UNKNOWN_HOLD_MINUTES', 60, 15, 180) * MINUTE) {\n  window.active = false;\n  window.lastClearedAt = now;\n}\nconst windowActive = window.active === true;\nconst windowJustCleared = wasWindowActive && !windowActive;\nconst overheatLimit = setting('OVERHEAT_LIMIT', 22.6, 19, 30);\nif (insideOk) {\n  state.overheat = state.overheat ? indoor > overheatLimit - 0.6 : indoor >= overheatLimit;\n  const warmThreshold = context.season === 'summer' ? 20 : setting('HARD_SUMMER_EXT_LIMIT', 25, 18, 35);\n  state.warmStandby = outdoor !== null && (state.warmStandby\n    ? outdoor >= warmThreshold - 2 && indoor >= comfort - 0.5\n    : outdoor >= warmThreshold && indoor >= comfort + 0.3);\n}\nif (windowActive) {\n  requested = eco;\n  targetMode = 'WINDOW_OPEN_ECO';\n  reason = nativeWindow === true ? 'ouverture_signalee_par_tado' : 'temporisation_apres_signal_fenetre';\n} else if (insideOk && state.overheat) {\n  requested = eco;\n  targetMode = 'OVERHEAT_ECO';\n  reason = 'surchauffe_mesuree';\n} else if (insideOk && state.warmStandby) {\n  requested = eco;\n  targetMode = 'WARM_WEATHER_ECO';\n  reason = 'temps_doux_et_piece_deja_chaude';\n} else if (Math.max(solarReduction, trendReduction) > 0.1) {\n  reason = 'reduction_limitee_montee_mesuree';\n}\nconst legacyScriptOff = store.script_turned_it_off === true && !state.lastApplied;\nconst externalOff = power === 'OFF' && enabled('RESPECT_MANUAL_OFF', true) && !windowActive && !windowJustCleared && !legacyScriptOff && state.lastApplied?.mode !== 'WINDOW_OPEN_ECO';\nlet target = quantize(requested);\n// A small deadband around each rounding boundary prevents alternating half-degree requests.\nif (!targetMode.endsWith('_ECO') && allowed.includes(current) && power === 'ON' && target !== current) {\n  const boundary = Math.abs(target - current) / 2 + setting('SETPOINT_DEADBAND_C', 0.1, 0, 0.25);\n  if (Math.abs(requested - current) < boundary) target = current;\n}\nconst lastUpdate = numeric(state.lastApplied?.ts) ?? 0;\nconst urgent = (windowActive && (state.lastApplied?.mode !== 'WINDOW_OPEN_ECO' || current !== eco || power !== 'ON')) || windowJustCleared || (insideOk && state.overheat && current !== eco) || (insideOk && indoor < 12 && !windowActive);\nconst delayOk = now - lastUpdate >= setting('MIN_DELAY_MINUTES', 25, 0, 180) * MINUTE || urgent;\nconst targetChangedEnough = current === null || Math.abs(target - current) >= setting('MIN_DELTA_SETPOINT', 0.5, 0.5, 2) || power === 'OFF';\nlet action = targetChangedEnough && delayOk ? 'UPDATE' : 'IGNORE';\nif (!insideOk || !['ON', 'OFF'].includes(power)) {\n  action = 'IGNORE';\n  reason = 'mesure_interieure_ou_etat_tado_indisponible';\n  targetMode = 'DATA_UNAVAILABLE';\n} else if (externalOff) {\n  action = 'IGNORE';\n  reason = 'etat_off_externe_respecte';\n  targetMode = 'EXTERNAL_OFF_RESPECTED';\n}\n\n// Tetens vapor pressure (hPa); the same equation is used for RH, dew point and ventilation advice.\nconst saturation = temperature => 6.11 * 10 ** (7.5 * temperature / (237.3 + temperature));\nconst pressureInside = insideOk && humidityOk ? saturation(indoor) * humidity / 100 : null;\nconst pressureOutside = outdoor !== null && outsideHumidity !== null ? saturation(outdoor) * outsideHumidity / 100 : null;\nfunction dewPoint(pressure) {\n  if (pressure === null || pressure <= 0) return null;\n  const a = Math.log10(pressure / 6.11);\n  return 237.3 * a / (7.5 - a);\n}\nconst dewInside = dewPoint(pressureInside);\nconst dewOutside = dewPoint(pressureOutside);\nconst equivalentOutsideRh = insideOk && pressureOutside !== null ? 100 * pressureOutside / saturation(indoor) : null;\nconst dryingBenefit = humidityOk && equivalentOutsideRh !== null ? humidity - equivalentOutsideRh : null;\nconst effectiveVentilation = dryingBenefit !== null && dryingBenefit >= setting('VENTILATION_MIN_RH_GAIN', 5, 2, 20);\n// This surface estimate is diagnostic only; it never raises the heating target.\nconst measuredSurface = numeric(data.temp_surface_interieure);\nconst surfaceTemperature = measuredSurface ?? (insideOk && outdoor !== null && outdoor < indoor\n  ? outdoor + setting('SURFACE_FACTOR', 0.75, 0.3, 1) * (indoor - outdoor) : null);\nconst condensationMargin = dewInside !== null && surfaceTemperature !== null ? surfaceTemperature - dewInside : null;\nconst condensationRisk = humidityOk && condensationMargin !== null && condensationMargin <= setting('CONDENSATION_MARGIN_C', 2, 0, 5);\nconst low = setting('HUMIDITY_LOW_PERCENT', 30, 15, 45);\nconst high = setting('HUMIDITY_HIGH_PERCENT', 60, 50, 80);\nconst criticalLow = Math.min(low - 2, setting('HUMIDITY_CRITICAL_LOW_PERCENT', 25, 5, 40));\nconst criticalHigh = Math.max(high + 2, setting('HUMIDITY_CRITICAL_HIGH_PERCENT', 70, 55, 95));\nconst hysteresis = setting('HUMIDITY_HYSTERESIS_PERCENT', 3, 1, 5);\nstate.humidity ??= {};\nconst hum = state.humidity;\nlet humidityStatus = 'unknown', humiditySeverity = 'none';\nif (humidityOk) {\n  humidityStatus = 'normal';\n  if (humidity <= low || (hum.status === 'too_dry' && humidity < low + hysteresis)) humidityStatus = 'too_dry';\n  else if (humidity >= high || condensationRisk || (hum.status === 'too_humid' && humidity > high - hysteresis)) humidityStatus = 'too_humid';\n  if (humidityStatus !== 'normal') {\n    humiditySeverity = (humidityStatus === 'too_dry'\n      ? humidity <= criticalLow || (hum.status === 'too_dry' && hum.severity === 'critical' && humidity < criticalLow + 2)\n      : humidity >= criticalHigh || (hum.status === 'too_humid' && hum.severity === 'critical' && humidity > criticalHigh - 2)) ? 'critical' : 'warning';\n  }\n}\nconst humiditySample = numeric(data.humidity_sample_ts);\nconst candidateKey = `${humidityStatus}:${humiditySeverity}`;\nconst gapTooLong = humiditySample !== null && hum.lastSampleTs !== undefined && humiditySample - hum.lastSampleTs > setting('SENSOR_MAX_AGE_MINUTES', 90, 5, 1440) * MINUTE;\nif (!humidityOk) {\n  hum.candidate = null;\n  hum.count = 0;\n} else if (humiditySample !== null && humiditySample !== hum.lastSampleTs) {\n  if (hum.candidate !== candidateKey || gapTooLong) {\n    hum.candidate = candidateKey;\n    hum.since = humiditySample;\n    hum.count = 1;\n  } else hum.count = (hum.count ?? 0) + 1;\n  hum.lastSampleTs = humiditySample;\n  hum.status = humidityStatus;\n  hum.severity = humiditySeverity;\n}\nconst confirmMinutes = humiditySeverity === 'critical'\n  ? setting('HUMIDITY_CRITICAL_CONFIRM_MINUTES', 5, 0, 60)\n  : setting('HUMIDITY_CONFIRM_MINUTES', 30, 0, 180);\nconst confirmed = humidityOk && hum.candidate === candidateKey && hum.count >= 2 && humiditySample - hum.since >= confirmMinutes * MINUTE;\nconst extreme = humidityOk && (humidity <= 15 || humidity >= 85);\nconst abnormal = !['normal', 'unknown'].includes(humidityStatus);\nif (confirmed && !abnormal) hum.activeEpisode = null;\nif (abnormal && (confirmed || extreme) && (!hum.activeEpisode || hum.activeEpisode.family !== humidityStatus)) {\n  hum.activeEpisode = { id: `${hum.since}:${humidityStatus}`, family: humidityStatus };\n}\nconst lastHumAlert = hum.lastSent ?? {};\nconst elapsedHumAlert = lastHumAlert.ts === undefined ? Infinity : now - lastHumAlert.ts;\nconst escalated = lastHumAlert.family === humidityStatus && lastHumAlert.severity === 'warning' && humiditySeverity === 'critical';\nconst newEpisode = lastHumAlert.episodeId !== hum.activeEpisode?.id;\nconst cooldownHours = escalated ? 0.5 : newEpisode ? 2 : humiditySeverity === 'critical'\n  ? setting('HUMIDITY_CRITICAL_REMINDER_HOURS', 6, 1, 48)\n  : setting('HUMIDITY_REMINDER_HOURS', 12, 1, 72);\nconst sendHumAlert = abnormal && (confirmed || extreme) && elapsedHumAlert >= cooldownHours * HOUR;\n\nconst idealRange = context.season === 'winter' ? '35–50 %' : context.season === 'summer' ? '40–60 %' : '40–55 %';\nfunction humidityAdvice() {\n  if (humidityStatus === 'too_dry') {\n    const outdoorAdvice = dryingBenefit !== null && dryingBenefit > 5 ? \"L’air extérieur assécherait encore la pièce une fois réchauffé. \" : '';\n    return `${outdoorAdvice}Garde l’aération quotidienne et la ventilation habituelle, évite de surchauffer et surveille le taux avant d’humidifier davantage.`;\n  }\n  const storm = String(data.condition_meteo_main).toLowerCase() === 'thunderstorm';\n  if (storm || (wind !== null && wind >= 12)) return \"Orage ou vent fort : privilégie la VMC ou l’extraction ; aère brièvement quand les conditions le permettent.\";\n  if (nativeWindow === true && effectiveVentilation) return \"Tado signale déjà une ouverture. L’air extérieur peut assécher la pièce ; surveille la baisse d’humidité et évite de prolonger inutilement l’aération.\";\n  if (effectiveVentilation) {\n    const duration = outdoor <= 8 || (wind !== null && wind >= 5) ? '5 à 10' : 'environ 10';\n    const rain = ['rain', 'drizzle', 'snow'].includes(String(data.condition_meteo_main).toLowerCase()) ? \" Choisis une ouverture abritée des précipitations.\" : '';\n    return `Aérer ${duration} minutes peut assécher la pièce : l’air extérieur ramené à ${rounded(indoor, 1)} °C serait à environ ${rounded(equivalentOutsideRh, 0)} % HR.${rain} Garde la ventilation habituelle.`;\n  }\n  if (dryingBenefit === null) return \"Données extérieures insuffisantes pour conseiller une aération déshumidifiante. Garde la ventilation habituelle et vérifie les sources d’humidité.\";\n  return \"L’air extérieur n’est pas assez sec pour déshumidifier efficacement par une longue aération. Garde la ventilation habituelle, utilise l’extraction et vérifie les sources d’humidité ; un déshumidificateur peut aider si cela persiste.\";\n}\nconst alertMessage = abnormal ? [\n  humidityStatus === 'too_dry' ? `🌵 Air ${humiditySeverity === 'critical' ? 'très ' : ''}sec : ${rounded(humidity, 1)} % HR.` : `💧 ${condensationRisk && humidity < high ? 'Risque de condensation sur paroi froide' : humiditySeverity === 'critical' ? 'Air très humide' : 'Air humide'} : ${rounded(humidity, 1)} % HR.`,\n  insideOk ? `Intérieur : ${rounded(indoor, 1)} °C. Repère de confort saisonnier : ${idealRange}.` : `Repère de confort saisonnier : ${idealRange}.`,\n  condensationRisk ? `Point de rosée : ${rounded(dewInside, 1)} °C ; paroi ${measuredSurface === null ? 'estimée' : 'mesurée'} à ${rounded(surfaceTemperature, 1)} °C. ${measuredSurface === null ? 'Estimation à vérifier sur place.' : ''}` : '',\n  humidityAdvice()\n].filter(Boolean).join('\\n') : null;\n\n// Only successful Telegram acknowledgements update lastSent; failed messages remain retryable.\nconst windowReminder = setting('WINDOW_REMINDER_MINUTES', 60, 15, 360) * MINUTE;\nconst sendWindowAlert = data.tado_api_ok === true && nativeWindow === true && (window.lastSent?.episodeId !== window.episodeId || now - window.lastSent.ts >= windowReminder);\nconst windowMessage = sendWindowAlert ? [\n  window.lastSent?.episodeId === window.episodeId ? '🪟 Tado signale toujours une fenêtre ouverte.' : '🪟 Tado vient de signaler une fenêtre ouverte.',\n  insideOk ? `Intérieur : ${rounded(indoor, 1)} °C${humidityOk ? ` · Humidité : ${rounded(humidity, 1)} %` : ''}.` : 'Température intérieure indisponible.',\n  action === 'UPDATE' ? `Consigne demandée : ${target} °C, mode ON.` : insideOk && current === eco && power === 'ON' ? `Consigne actuelle : ${eco} °C, mode ON.` : 'Vérifie le chauffage dans Tado : aucune nouvelle consigne n’a été envoyée par cette décision.',\n  'Vérifie la fenêtre. Tado déduit l’ouverture des variations de température/humidité ; ce signal ne remplace pas un capteur de contact.'\n].join('\\n') : null;\n\nreturn [{ json: {\n  ...data,\n  cible: target,\n  target_mode: targetMode,\n  action,\n  reason,\n  delayOk,\n  targetChangedEnough,\n  sendHumAlert,\n  alertMessage,\n  sendWindowAlert,\n  windowMessage,\n  humidity_alert_meta: sendHumAlert ? { ts: now, family: humidityStatus, severity: humiditySeverity, episodeId: hum.activeEpisode.id } : null,\n  window_alert_meta: sendWindowAlert ? { ts: now, episodeId: window.episodeId } : null,\n  debug_thermique: {\n    timezone, ...context, presence, presence_source: typeof data.presence === 'boolean' ? 'tado' : 'configuration',\n    confort_base: rounded(baseComfort), correction_meteo: rounded(weatherCorrection), confort_cible: rounded(comfort),\n    consigne_avant_arrondi: rounded(requested), tendance_deg_par_heure: rounded(trend), echantillons_tendance: trendPoints.length,\n    anticipation_horaire: preheating, fenetre_active: windowActive, surchauffe: !!state.overheat, temps_doux: !!state.warmStandby\n  },\n  debug_solaire: {\n    elevation: rounded(solar?.elevation), azimut: rounded(solar?.azimuth), nuages: clouds,\n    gain_estime: rounded(solarScore), reduction_solaire_c: rounded(solarReduction), reduction_tendance_c: rounded(trendReduction)\n  },\n  debug_humidite: {\n    statut: humidityStatus, severite: humiditySeverity, plage_ideale: idealRange,\n    seuil_bas: low, seuil_haut: high, seuil_critique_bas: criticalLow, seuil_critique_haut: criticalHigh,\n    point_rosee_interieur_c: rounded(dewInside), point_rosee_exterieur_c: rounded(dewOutside),\n    humidite_absolue_interieure_g_m3: pressureInside === null ? null : rounded(216.7 * pressureInside / (indoor + 273.15)),\n    humidite_absolue_exterieure_g_m3: pressureOutside === null ? null : rounded(216.7 * pressureOutside / (outdoor + 273.15)),\n    humidite_exterieure_ramenee_interieur_percent: rounded(equivalentOutsideRh), gain_aeration_points_hr: rounded(dryingBenefit),\n    aeration_deshumidifiante: effectiveVentilation, temperature_paroi_c: rounded(surfaceTemperature),\n    paroi_estimee: measuredSurface === null, marge_condensation_c: rounded(condensationMargin), risque_condensation: condensationRisk,\n    nombre_mesures_consecutives: hum.count ?? 0, confirme: confirmed, meteo: data.condition_meteo\n  }\n} }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -432,
-        304
+        432,
+        992
       ],
-      "id": "dc05d07b-dd5f-41bb-afdc-c8019645b8d3",
+      "id": "c1688e62-54b5-5393-b565-94cbb985ec20",
       "name": "Décision chauffage"
     },
     {
@@ -114,7 +117,7 @@
           },
           "conditions": [
             {
-              "id": "012d8a77-5f95-4d30-9bc2-69dd3bac1082",
+              "id": "2c3471bd-1d8d-56ad-8676-019b0b9974fc",
               "leftValue": "={{$json.action}}",
               "rightValue": "UPDATE",
               "operator": {
@@ -132,10 +135,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        -224,
-        96
+        640,
+        784
       ],
-      "id": "bc87e117-6133-473e-bb13-75b57de61a7a",
+      "id": "b8821e72-34e6-57e5-b3fe-bb811f70831a",
       "name": "Action = UPDATE ?"
     },
     {
@@ -153,55 +156,63 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ (() => {\n  const isOff = $json.target_mode === \"MANUAL_OFF_RESPECTED\" || $json.cible <= 5;\n\n  const body = {\n    setting: {\n      type: \"HEATING\",\n      power: isOff ? \"OFF\" : \"ON\"\n    },\n    termination: {\n      type: \"TADO_MODE\"\n    }\n  };\n\n  if (!isOff) {\n    body.setting.temperature = {\n      celsius: $json.cible\n    };\n  }\n\n  return body;\n})() }}",
-        "options": {}
+        "jsonBody": "={{ (() => {\n  const target = $json.cible;\n  const allowed = Number.isFinite(target) && target >= 6 && target <= 25 &&\n    (target < 15 ? Number.isInteger(target) : Number.isInteger(target * 2));\n  if (!allowed) throw new Error('Consigne Tado invalide : 6–14 entiers, puis 15–25 par pas de 0,5.');\n  return {\n    setting: { type: 'HEATING', power: 'ON', temperature: { celsius: target } },\n    termination: { type: 'TADO_MODE' }\n  };\n})() }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          },
+          "timeout": 20000
+        }
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        0,
-        0
+        864,
+        688
       ],
-      "id": "0faf8b4c-ecd1-485b-bb30-e992f413855d",
-      "name": "Appliquer overlay Tado"
+      "id": "d04d39b5-5f60-593d-847b-1e7ac8d85ab8",
+      "name": "Appliquer overlay Tado",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "const decision = $('Décision chauffage').first().json;\nconst staticData = $getWorkflowStaticData('global');\n\nstaticData.last_tado_update_ts = Date.now();\n\n// L'ASTUCE EST ICI : Le script note dans sa mémoire s'il vient d'éteindre le chauffage (cible = 5)\nstaticData.script_turned_it_off = (decision.cible <= 5);\n\nreturn [{\n  message: `Consigne mise à jour sur ${decision.cible}°C`,\n  cible: decision.cible,\n  reason: decision.reason\n}];"
+        "jsCode": "const decision = $('Décision chauffage').first().json;\nconst store = $getWorkflowStaticData('global');\nconst response = $json;\nconst body = response.body ?? response;\nconst status = Number(response.statusCode);\nconst accepted = !response.error && ((status >= 200 && status < 300) ||\n  (body.setting?.power === 'ON' && Number(body.setting?.temperature?.celsius) === decision.cible));\nif (accepted) {\n  store.climate_v2 ??= {};\n  const state = store.climate_v2[decision.zone_key] ??= {};\n  state.lastApplied = { ts: Date.now(), target: decision.cible, mode: decision.target_mode };\n  // Clear legacy flags only after Tado has acknowledged an ON request.\n  store.script_turned_it_off = false;\n  store.script_last_mode = decision.target_mode;\n  store.last_tado_update_ts = Date.now();\n}\nreturn [{ json: {\n  ...decision,\n  update_applied: accepted,\n  update_error: accepted ? null : 'La mise à jour Tado n’a pas été confirmée. Vérifier la réponse du nœud HTTP.',\n  message: accepted ? `Tado a accepté la consigne ${decision.cible} °C (ON).` : 'Mise à jour non confirmée.'\n} }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        224,
-        0
+        1088,
+        688
       ],
-      "id": "82d561bf-50c0-4dea-ab06-fc4443f06600",
+      "id": "788bdb6a-d594-54f2-9cec-3abbc21d6268",
       "name": "Mémoriser update"
     },
     {
       "parameters": {
-        "jsCode": "const decision = $('Décision chauffage').first().json;\n\nreturn [{\n  message: \"Aucune modification nécessaire\",\n  ...decision\n}];"
+        "jsCode": "return [{ json: {\n  ...$('Décision chauffage').first().json,\n  update_applied: false,\n  message: 'Aucune modification de consigne nécessaire.'\n} }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        112,
-        144
+        976,
+        832
       ],
-      "id": "afdb9329-b65b-4044-a2ba-10228d674e49",
+      "id": "287b48a2-a5f7-5fad-bff8-9927072e16b4",
       "name": "Aucune modification nécessaire"
     },
     {
       "parameters": {
-        "jsCode": "const decision = $('Décision chauffage').first().json;\n\nreturn [{\n  timestamp: new Date().toISOString(),\n  temp_interieure: decision.temp_interieure,\n  temp_exterieure: decision.temp_exterieure,\n  consigne_actuelle: decision.consigne_actuelle,\n  cible: decision.cible,\n  target_mode: decision.target_mode,\n  action: decision.action,\n  reason: decision.reason,\n  delayOk: decision.delayOk,\n  targetChangedEnough: decision.targetChangedEnough,\n  debug_solaire: decision.debug_solaire,\n  debug_thermique: decision.debug_thermique\n}];"
+        "jsCode": "return [{ json: {\n  timestamp: new Date().toISOString(),\n  ...$json\n} }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        448,
-        96
+        1312,
+        784
       ],
-      "id": "f30f6b67-b8f5-4e29-a942-f3ac5fab4569",
+      "id": "9c6bb9e6-3a4d-5efc-9235-cfeebfa9be7f",
       "name": "Journal décision"
     },
     {
@@ -211,10 +222,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -1104,
-        496
+        -240,
+        1184
       ],
-      "id": "6a5c1733-6e89-41bd-bf0d-84cb8ce698a4",
+      "id": "7e01883b-c3fe-5216-b033-2cbb4a000dd0",
       "name": "Demander nouveau device code"
     },
     {
@@ -224,10 +235,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -656,
-        496
+        208,
+        1184
       ],
-      "id": "e24050a8-4efb-4a8f-ad65-fea0e52dc0c8",
+      "id": "52730d8f-b77e-5a49-a71f-805b8596bdec",
       "name": "Code in JavaScript"
     },
     {
@@ -235,39 +246,39 @@
         "assignments": {
           "assignments": [
             {
-              "id": "8b100855-0fec-47a3-9e4e-e91ba4b69420",
+              "id": "ffe00504-2434-5400-9cb6-9081085b1652",
               "name": "TADO_EMAIL",
-              "value": "",
+              "value": "YOUR_TADO_EMAIL",
               "type": "string"
             },
             {
-              "id": "80b3b11e-9946-46c4-97c0-db0602860072",
+              "id": "1ab9b2d6-7674-5665-981d-02632ab56ea9",
               "name": "CLIENT_ID",
-              "value": "",
+              "value": "YOUR_CLIENT_ID",
               "type": "string"
             },
             {
-              "id": "3c9e9cf8-2a0d-4e14-9080-bcf776581971",
+              "id": "c49d6d38-0a85-5342-83a6-e0ec201cda97",
               "name": "TADO_PASSWORD",
-              "value": "",
+              "value": "YOUR_TADO_PASSWORD",
               "type": "string"
             },
             {
-              "id": "f5c0ec08-5588-44b3-bdb5-508b76f76abd",
+              "id": "abf5e47d-6686-5a6d-a985-5d8c18255b7c",
               "name": "HOME_ID",
-              "value": "",
+              "value": "YOUR_HOME_ID",
               "type": "string"
             },
             {
-              "id": "712127e1-d466-49ae-a0a1-96cf72311ee6",
+              "id": "c3261a1b-e353-5d1e-9309-c7e140bc3aec",
               "name": "ZONE_ID",
-              "value": "",
+              "value": "YOUR_ZONE_ID",
               "type": "string"
             },
             {
-              "id": "05627520-e04a-4677-9ec0-d1d834b06286",
+              "id": "a707c703-b05f-5be6-88ef-1087a2ffc7cd",
               "name": "ID_Telegram",
-              "value": "",
+              "value": "YOUR_ID_TELEGRAM",
               "type": "string"
             }
           ]
@@ -277,16 +288,16 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        -2000,
-        480
+        -1136,
+        1168
       ],
-      "id": "39b80363-b908-4023-a537-0970370263f2",
+      "id": "ba255be7-14e4-592f-b480-56416890f8c7",
       "name": "Configuration Tado"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "http://browserless:3000/function?token=Z3phirBrowserless2026",
+        "url": "http://browserless:3000/function?token=YOUR_BROWSERLESS_TOKEN",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -304,10 +315,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        -880,
-        496
+        -16,
+        1184
       ],
-      "id": "08798211-e391-4056-84c3-64f8168dc91d",
+      "id": "f6e33aff-85a0-5664-b6b0-01f6399e98e3",
       "name": "HTTP Request"
     },
     {
@@ -315,135 +326,255 @@
         "assignments": {
           "assignments": [
             {
-              "id": "36c6754e-b7d3-45d9-b887-19c64f9bc874",
+              "id": "278d14b7-2719-51a0-9f63-578f20fc4bd1",
               "name": "Lat",
-              "value": null,
+              "value": 0,
               "type": "number"
             },
             {
-              "id": "6c8d3f28-0625-4581-951e-46deab431864",
+              "id": "4abb1d10-65ca-5e85-99b7-478959e931d0",
               "name": "Lon",
-              "value": null,
+              "value": 0,
               "type": "number"
             },
             {
-              "id": "4b042d2a-23fe-4307-aad1-b3bff01c4c13",
+              "id": "5ebe8c3c-6dec-5d3e-9b05-a88e37b35de8",
               "name": "AZIMUTH",
-              "value": null,
+              "value": 285,
               "type": "number"
             },
             {
-              "id": "eff39b02-8056-4c39-89da-fee89d7b2e90",
+              "id": "3934667f-57de-5043-a185-ebe807c7dd10",
               "name": "AZIMUTH_TOLERANCE",
-              "value": null,
+              "value": 45,
               "type": "number"
             },
             {
-              "id": "f17b6280-652d-46a2-84b9-c5d8212a974d",
+              "id": "4bbc6677-7dcb-59ea-b14b-b7a1a0932411",
               "name": "Min_thérmostat",
-              "value": null,
+              "value": 6,
               "type": "number"
             },
             {
-              "id": "eebc234b-dcc2-47f8-8221-0b028ecf5f37",
+              "id": "4319c872-2965-54d0-b88e-a88418f1e503",
               "name": "Max_thérmostat",
-              "value": null,
+              "value": 25,
               "type": "number"
             },
             {
-              "id": "67e9340d-fb15-4919-bd2e-4266ed517de1",
+              "id": "7004ddf8-33fb-56be-a5a1-a6bb158bbb7b",
               "name": "THERMAL_INERTIA",
-              "value": null,
+              "value": 0.9,
               "type": "number"
             },
             {
-              "id": "beb96593-d759-4f04-be27-9f10ba2c02f9",
+              "id": "d1f3938a-97d8-5c54-bced-52d5dd12413d",
               "name": "MIN_DELTA_SETPOINT",
-              "value": null,
+              "value": 0.5,
               "type": "number"
             },
             {
-              "id": "f58ed393-220e-47a5-8a5b-796f511fa08d",
+              "id": "f758641f-fbb4-5744-a924-21248d46d416",
               "name": "MIN_DELAY_MINUTES",
-              "value": null,
+              "value": 25,
               "type": "number"
             },
             {
-              "id": "3386ec3c-8644-4b11-a9dc-3b35376c37cd",
+              "id": "9f4e3788-a71d-5d87-b15a-b34e92e87efb",
               "name": "OVERHEAT_LIMIT",
-              "value": null,
+              "value": 22.6,
               "type": "number"
             },
             {
-              "id": "8d372d4f-6c1c-45fd-9259-ef1f42e6e7b3",
+              "id": "377ba49d-627a-5869-b10d-e2734fdcb369",
               "name": "HARD_SUMMER_EXT_LIMIT",
-              "value": null,
+              "value": 25,
               "type": "number"
             },
             {
-              "id": "dd02ae76-cb1b-495a-9d8f-530e2a573256",
+              "id": "e10b4f99-62b5-5cbc-9f7c-9c02a2fe8125",
               "name": "WORKDAY_MORNING_HOUR",
-              "value": null,
+              "value": 6,
               "type": "number"
             },
             {
-              "id": "db8dd7bb-9f8c-4dfe-b6a5-682902c03084",
+              "id": "b68162d3-b746-5f68-af5d-b214db0bed01",
               "name": "WEEKEND_MORNING_HOUR",
-              "value": null,
+              "value": 8,
               "type": "number"
             },
             {
-              "id": "ab5fdcbb-b5d3-4112-b7ed-1524c67cb50c",
+              "id": "a0e5b992-619a-5ec7-bbdc-518745a160e3",
               "name": "EVENING_START_HOUR",
-              "value": null,
+              "value": 17,
               "type": "number"
             },
             {
-              "id": "de4a2ffd-0dc5-438e-9aca-e2bfb15f4295",
+              "id": "db669f20-0a41-52d8-b44d-a853830ececf",
               "name": "NIGHT_START_HOUR",
-              "value": null,
+              "value": 22,
               "type": "number"
             },
             {
-              "id": "5e5b47f2-4c37-46d6-bf4b-adffa3a03769",
+              "id": "4b080dee-48b6-5570-b1bc-9ca198d7f223",
               "name": "LATE_NIGHT_START_HOUR",
-              "value": null,
+              "value": 23,
               "type": "number"
             },
             {
-              "id": "7142be0e-36e9-4d6d-898e-f4c47612b4ae",
-              "name": "SUNSET_PREHEAT_WINDOW_MIN",
-              "value": null,
-              "type": "number"
-            },
-            {
-              "id": "76149e40-c6f1-49e4-b820-17290e279467",
-              "name": "SOLAR_BONUS_MAX",
-              "value": null,
-              "type": "number"
-            },
-            {
-              "id": "eb4bca1c-5ca0-4e16-8064-274c1114ec59",
-              "name": "TREND_WEIGHT",
-              "value": null,
-              "type": "number"
-            },
-            {
-              "id": "9e98c2e3-b098-4414-9bf3-f468662789af",
+              "id": "3b745a63-068d-5a12-a129-8d05f16821b5",
               "name": "DEFAULT_PRESENCE",
               "value": true,
               "type": "boolean"
             },
             {
-              "id": "87d07c7c-1d9d-4b31-a6c7-ab5ed99af5ed",
-              "name": "MODE_OFF",
-              "value": null,
+              "id": "a1e02804-badd-53af-b13b-04dd081ee977",
+              "name": "TIMEZONE",
+              "value": "Europe/Paris",
+              "type": "string"
+            },
+            {
+              "id": "4c4704b5-2aad-5bb7-b766-4d2f477e8009",
+              "name": "COMFORT_OFFSET_C",
+              "value": 0,
               "type": "number"
             },
             {
-              "id": "253659d0-f410-4ade-90bb-3db64ff8018e",
-              "name": "MODE_ECO_MIN",
-              "value": null,
+              "id": "42554ada-2762-5a7a-a744-7cd8c7124ca1",
+              "name": "AWAY_TARGET_C",
+              "value": 17.5,
+              "type": "number"
+            },
+            {
+              "id": "dffdb573-9959-5ace-8d4d-c9b1e7e7fcf7",
+              "name": "RESPECT_MANUAL_OFF",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "0e77978b-13da-5c00-8406-6d5597d2b456",
+              "name": "PREHEAT_MINUTES",
+              "value": 45,
+              "type": "number"
+            },
+            {
+              "id": "c4392c17-0835-5241-91e5-2b73fc673f78",
+              "name": "MAX_SOLAR_REDUCTION_C",
+              "value": 0.5,
+              "type": "number"
+            },
+            {
+              "id": "10eb619c-f3e5-52f8-8a55-4e126d64d917",
+              "name": "SETPOINT_DEADBAND_C",
+              "value": 0.1,
+              "type": "number"
+            },
+            {
+              "id": "748b393c-b3a4-5095-b672-e0ad115d24cf",
+              "name": "TREND_WINDOW_MINUTES",
+              "value": 120,
+              "type": "number"
+            },
+            {
+              "id": "4c1c1c45-6aa1-574a-b01c-fed956ad48d3",
+              "name": "SENSOR_MAX_AGE_MINUTES",
+              "value": 90,
+              "type": "number"
+            },
+            {
+              "id": "ab2dbd76-21a7-547c-80b2-84a05121498c",
+              "name": "WEATHER_MAX_AGE_MINUTES",
+              "value": 120,
+              "type": "number"
+            },
+            {
+              "id": "5c2e2484-e46c-5d69-b7b7-9754854421cf",
+              "name": "WINDOW_HOLD_MINUTES",
+              "value": 15,
+              "type": "number"
+            },
+            {
+              "id": "6c0342c3-8117-56bd-9760-9b80f7d8efc6",
+              "name": "WINDOW_UNKNOWN_HOLD_MINUTES",
+              "value": 60,
+              "type": "number"
+            },
+            {
+              "id": "4255acce-0564-58dd-b61a-88149b94657d",
+              "name": "WINDOW_REMINDER_MINUTES",
+              "value": 60,
+              "type": "number"
+            },
+            {
+              "id": "fd2d10f5-33f4-578f-9fd1-da396bab4a33",
+              "name": "HUMIDITY_LOW_PERCENT",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "2af0cb08-1e0a-5cf5-a057-bcdfdbefca5e",
+              "name": "HUMIDITY_HIGH_PERCENT",
+              "value": 60,
+              "type": "number"
+            },
+            {
+              "id": "8ab5ed65-fa8d-52f3-9831-8bec2f34dc4f",
+              "name": "HUMIDITY_CRITICAL_LOW_PERCENT",
+              "value": 25,
+              "type": "number"
+            },
+            {
+              "id": "f6edeee8-d8ab-5bb2-bba5-dbd58e096691",
+              "name": "HUMIDITY_CRITICAL_HIGH_PERCENT",
+              "value": 70,
+              "type": "number"
+            },
+            {
+              "id": "9b52bfe5-00bc-56cf-a968-c0660de921b6",
+              "name": "HUMIDITY_HYSTERESIS_PERCENT",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "ddd97f5c-8f00-56f2-8b23-0e337dfc7f5c",
+              "name": "HUMIDITY_CONFIRM_MINUTES",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "551d1f76-1567-5f80-b28e-fbb75fd796a7",
+              "name": "HUMIDITY_CRITICAL_CONFIRM_MINUTES",
+              "value": 5,
+              "type": "number"
+            },
+            {
+              "id": "9eff7ff0-e553-50fb-b4a1-ba664e73088c",
+              "name": "HUMIDITY_REMINDER_HOURS",
+              "value": 12,
+              "type": "number"
+            },
+            {
+              "id": "b630e924-2978-55be-88b2-891770c24a83",
+              "name": "HUMIDITY_CRITICAL_REMINDER_HOURS",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "70c84715-77c5-509e-9a0e-bb8654f47aae",
+              "name": "VENTILATION_MIN_RH_GAIN",
+              "value": 5,
+              "type": "number"
+            },
+            {
+              "id": "19c85b30-3e64-5496-bc81-65d727495e6d",
+              "name": "SURFACE_FACTOR",
+              "value": 0.75,
+              "type": "number"
+            },
+            {
+              "id": "83c2ed28-729a-551f-accf-bf112f2a71e0",
+              "name": "CONDENSATION_MARGIN_C",
+              "value": 2,
               "type": "number"
             }
           ]
@@ -453,33 +584,31 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        -1776,
-        480
+        -912,
+        1168
       ],
-      "id": "b4cdb790-f374-44e2-a064-daba37d3018b",
+      "id": "ad11479c-c152-5cde-99e9-3a2d41d1d55e",
       "name": "Configuration Logement"
     },
     {
       "parameters": {
         "chatId": "={{ $('Configuration Tado').item.json.ID_Telegram }}",
-        "text": "=={{ $json.alertMessage }}",
-        "additionalFields": {}
+        "text": "={{ $json.alertMessage }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
       },
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        16,
-        416
+        880,
+        1104
       ],
-      "id": "b2de3e6b-1ce7-43eb-b4ac-41af516cff76",
+      "id": "f7b3a4a5-4aff-5e5f-91e1-022cc1e43c2d",
       "name": "Send a text message",
-      "webhookId": "40669653-9e14-43d0-a4ff-96f7d85de815",
-      "credentials": {
-        "telegramApi": {
-          "id": "rnaGDb7l1aQ1QrVW",
-          "name": "Tado"
-        }
-      }
+      "webhookId": "80786767-689e-5ede-8a87-06e452e13d3b",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -492,7 +621,7 @@
           },
           "conditions": [
             {
-              "id": "fd63a244-d85d-4b71-8628-ecc259f1b4a2",
+              "id": "a2317f4c-8a6a-5af2-a3db-1da8075bb301",
               "leftValue": "={{$json.auth_ok}}",
               "rightValue": "true",
               "operator": {
@@ -509,10 +638,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        -1328,
-        400
+        -464,
+        1088
       ],
-      "id": "a6aa5496-136e-4f18-8870-1cdaef8fa7b7",
+      "id": "f1e435b2-156f-5f32-8788-6d001f952fe8",
       "name": "Vérification Token"
     },
     {
@@ -526,7 +655,7 @@
           },
           "conditions": [
             {
-              "id": "b4f44ccc-4125-400b-87d2-8dfeeaad84be",
+              "id": "f0f7dea2-a02a-519d-8181-dba2c53c216c",
               "leftValue": "={{ $json.sendHumAlert }}",
               "rightValue": "",
               "operator": {
@@ -543,14 +672,93 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        -208,
-        432
+        656,
+        1120
       ],
-      "id": "83d72002-0391-4236-af9f-c6b7874e41f9",
+      "id": "d01e3197-c5c2-5d88-b747-46773a914243",
       "name": "Humiditer"
+    },
+    {
+      "parameters": {
+        "jsCode": "const decision = $('Décision chauffage').first().json;\nconst response = $json;\nconst accepted = !response.error && response.ok !== false &&\n  (response.message_id !== undefined || response.result?.message_id !== undefined);\nconst metadata = decision.humidity_alert_meta;\nif (accepted && metadata) {\n  const store = $getWorkflowStaticData('global');\n  store.climate_v2 ??= {};\n  const state = store.climate_v2[decision.zone_key] ??= {};\n  state.humidity ??= {};\n  state.humidity.lastSent = { ...metadata, ts: Date.now() };\n}\nreturn [{ json: {\n  alert_type: 'humidity',\n  telegram_sent: accepted,\n  message: accepted ? 'Alerte envoyée et mémorisée.' : 'Envoi non confirmé : nouvelle tentative au prochain contrôle si le signal persiste.'\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        1104
+      ],
+      "id": "75c333c2-add7-5b65-a414-f40f5bb55997",
+      "name": "Mémoriser alerte humidité"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ba674f7a-0f9f-543f-96dc-c65a0ab80000",
+              "leftValue": "={{ $json.sendWindowAlert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        656,
+        1408
+      ],
+      "id": "59f1b954-e54d-590e-aa90-421f67208f63",
+      "name": "Fenêtre ouverte à signaler ?"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Configuration Tado').item.json.ID_Telegram }}",
+        "text": "={{ $json.windowMessage }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        1408
+      ],
+      "id": "b28cfece-214f-5e16-bea9-c38f1caa5693",
+      "name": "Telegram fenêtre ouverte",
+      "webhookId": "cfc6f1d1-4b56-5dd1-b026-edb71ecb640e",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const decision = $('Décision chauffage').first().json;\nconst response = $json;\nconst accepted = !response.error && response.ok !== false &&\n  (response.message_id !== undefined || response.result?.message_id !== undefined);\nconst metadata = decision.window_alert_meta;\nif (accepted && metadata) {\n  const store = $getWorkflowStaticData('global');\n  store.climate_v2 ??= {};\n  const state = store.climate_v2[decision.zone_key] ??= {};\n  state.window ??= {};\n  state.window.lastSent = { ...metadata, ts: Date.now() };\n}\nreturn [{ json: {\n  alert_type: 'window',\n  telegram_sent: accepted,\n  message: accepted ? 'Alerte envoyée et mémorisée.' : 'Envoi non confirmé : nouvelle tentative au prochain contrôle si le signal persiste.'\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        1408
+      ],
+      "id": "b237f3e0-6e72-5d48-9967-14be02c97fdc",
+      "name": "Mémoriser alerte fenêtre"
     }
   ],
-  "pinData": {},
   "connections": {
     "Schedule Trigger1": {
       "main": [
@@ -617,6 +825,11 @@
           },
           {
             "node": "Humiditer",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fenêtre ouverte à signaler ?",
             "type": "main",
             "index": 0
           }
@@ -757,18 +970,46 @@
           }
         ]
       ]
+    },
+    "Send a text message": {
+      "main": [
+        [
+          {
+            "node": "Mémoriser alerte humidité",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fenêtre ouverte à signaler ?": {
+      "main": [
+        [
+          {
+            "node": "Telegram fenêtre ouverte",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram fenêtre ouverte": {
+      "main": [
+        [
+          {
+            "node": "Mémoriser alerte fenêtre",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "active": false,
   "settings": {
     "executionOrder": "v1",
-    "binaryMode": "separate",
-    "availableInMCP": false
+    "binaryMode": "separate"
   },
-  "versionId": "a0029385-aa84-41c0-a3e1-f58812bb4383",
-  "meta": {
-    "instanceId": "196c70622468c4e89b9a635be78d21686bf811d1d4c3ee0dff380d732d8d61fa"
-  },
-  "id": "KqJQShL9HyGgC9Vp",
+  "active": false,
+  "pinData": {},
   "tags": []
 }
