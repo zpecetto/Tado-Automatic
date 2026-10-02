@@ -107,3 +107,39 @@ Alert frequency depends on the scheduler: a confirmation period set to 5 minutes
 Tado infers whether a window is open; its signal does not replace a contact sensor. Solar gain and wall temperature are estimates. Occupancy falls back to the configuration when no usable data is available.
 
 JSON, connections, JavaScript syntax and simulated decisions have been checked locally. Tado, weather, Browserless and Telegram services must be verified on the target installation.
+
+---
+
+## MAJ du 02/10/2026 : Anticipation du chauffage avec les prévisions météo sur cinq jours
+
+### Français
+
+Cette entrée décrit les évolutions du workflow **Chauffage** fourni le 02/10/2026 par rapport à la version publiée. Leur intégration dans `Tado.json` reste à finaliser : le point à corriger est détaillé ci-dessous.
+
+- **Prévisions météo sur cinq jours** : **Lire météo** passe à l'opération OpenWeatherMap `5DayForecast`. Le nouveau code de **Décision chauffage** prévoit d'analyser jusqu'à 120 heures, réparties en cinq périodes glissantes de 24 heures, avec une importance décroissante pour les jours les plus éloignés.
+- **Anticipation à court terme** : les six prochaines heures pilotent les ajustements, avec un horizon configurable de 6 à 12 heures. Les jours suivants peuvent renforcer un signal proche, mais ne déclenchent pas seuls une modification.
+- **Redoux annoncé** : réduction limitée de la consigne (`FORECAST_REDUCED`, jusqu'à 0,5 °C par défaut) si la pièce est suffisamment chaude et ne se refroidit pas trop vite. Un besoin de confort ou un préchauffage horaire empêche cette réduction.
+- **Refroidissement annoncé** : hausse limitée (`FORECAST_COLD`) uniquement si la température intérieure ou sa tendance indique un besoin, en présence et hors des phases de nuit. Le cumul des corrections pour le froid actuel et prévu est plafonné à +0,5 °C.
+- **Temps doux durable** : passage possible à la consigne éco (`FORECAST_MILD_ECO`) si les prévisions couvrent les prochaines 24 heures, avec un minimum de 18 °C par défaut, et si la pièce est déjà chaude avec une tendance mesurée stable ou montante. Le chauffage reste en mode ON à la consigne minimale configurée ; aucune commande OFF n'est ajoutée. Sinon, les règles habituelles restent applicables et peuvent conserver la consigne.
+- **Contrôle des données** : fraîcheur maximale des prévisions de 180 minutes par défaut, filtrage des dates et températures invalides, suppression des doublons et vérification de la continuité des créneaux. Les prévisions absentes, périmées ou insuffisantes ne servent pas à anticiper le chauffage. Les réductions solaire, tendance et prévisions ne sont pas additionnées : seule la plus forte est retenue.
+- **Diagnostic enrichi** : ajout de `debug_previsions` avec les températures moyennes/minimales, le résumé des cinq jours, les corrections et le motif de décision. Le message d'humidité peut aussi préciser quand la météo extérieure est estimée à partir des prévisions.
+
+**Point d'intégration à corriger :** dans le fichier analysé, **Fusionner données** conserve le traitement de la météo actuelle et ne transmet ni `previsions_meteo` ni `quality.forecast_fetched_at`, attendus par le nouveau code. Il faut adapter ce nœud à la sortie de `5DayForecast`, fournir des points `{ ts, temp }` (horodatage en millisecondes, température en °C), leur date de récupération et une température extérieure exploitable. Toute valeur extérieure issue des prévisions doit être signalée par `quality.weather_is_forecast_estimate`. Sans cette adaptation, `debug_previsions.utilisables` reste à `false` avec le motif `previsions_insuffisantes` ; les anciens champs de météo actuelle peuvent également devenir indisponibles après expiration du cache.
+
+Ce point a été vérifié par lecture du code et simulation locale de la chaîne **Fusionner données → Décision chauffage**, sans appel aux services ni modification d'une consigne réelle.
+
+### English — Update 2026-10-02: Heating anticipation using five-day weather forecasts
+
+This entry describes the changes in the **Chauffage** workflow supplied on 2026-10-02 compared with the published version. Integration into `Tado.json` is still pending; the required correction is explained below.
+
+- **Five-day forecasts**: **Lire météo** switches to OpenWeatherMap's `5DayForecast` operation. The new **Décision chauffage** code is designed to analyse up to 120 hours in five rolling 24-hour periods, with decreasing weight for more distant days.
+- **Short-term anticipation**: the next six hours drive adjustments, with a configurable horizon of 6 to 12 hours. Later days can strengthen a near-term signal but cannot trigger a change on their own.
+- **Expected warming**: a limited setpoint reduction (`FORECAST_REDUCED`, up to 0.5 °C by default) is possible when the room is warm enough and is not cooling too quickly. A comfort deficit or scheduled preheating prevents this reduction.
+- **Expected cooling**: a limited increase (`FORECAST_COLD`) is allowed only when indoor temperature or its trend indicates a need, with occupancy and outside night phases. The combined correction for current and forecast cold weather is capped at +0.5 °C.
+- **Sustained mild weather**: the eco setpoint (`FORECAST_MILD_ECO`) can be selected when forecasts cover the next 24 hours with a minimum of 18 °C by default, and the room is already warm with a measured stable or rising trend. Heating stays in ON mode at the configured minimum setpoint; no OFF command is added. Otherwise, the usual rules apply and may keep the existing setpoint.
+- **Data checks**: forecasts must be no older than 180 minutes by default. Invalid timestamps and temperatures are filtered, duplicates removed and time-slot coverage checked. Missing, stale or insufficient forecasts do not drive heating anticipation. Solar, trend and forecast reductions are not added together: only the largest is used.
+- **Additional diagnostics**: `debug_previsions` reports mean/minimum temperatures, a five-day summary, corrections and the decision reason. Humidity messages can also indicate when outdoor weather is estimated from forecasts.
+
+**Required integration correction:** in the reviewed file, **Fusionner données** still processes current weather and supplies neither `previsions_meteo` nor `quality.forecast_fetched_at`, which the new code expects. Adapt this node to the `5DayForecast` output and provide `{ ts, temp }` points (timestamps in milliseconds, temperatures in °C), their retrieval time and a usable outdoor temperature. Flag any forecast-derived outdoor value with `quality.weather_is_forecast_estimate`. Until then, `debug_previsions.utilisables` remains `false` with the reason `previsions_insuffisantes`; the previous current-weather fields may also become unavailable once the cache expires.
+
+This issue was checked through code inspection and a local simulation of **Fusionner données → Décision chauffage**, without service calls or changes to a real heating setpoint.
