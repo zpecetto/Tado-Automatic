@@ -8,10 +8,13 @@ Workflow n8n pour adapter une zone de chauffage Tado à la température intérie
 
 ### Fichier
 
-[Tado.json](Tado.json) contient les 23 nœuds du workflow. L'export est désactivé et anonymisé : aucune donnée épinglée, aucun identifiant de credential, token de session ou état d'exécution n'est inclus.
+[Tado.json](Tado.json) contient 32 éléments : 30 nœuds de workflow et 2 notes explicatives. L'export est désactivé et anonymisé : aucune donnée épinglée, aucun identifiant de credential, token de session ou état d'exécution n'est inclus.
 
 ### Changements
 
+- Diagnostic manuel du compte et des zones Tado, avec vérification du couple `HOME_ID` / `ZONE_ID` et du type `HEATING`.
+- Erreurs HTTP et absence de notification expliquées dans la sortie : `tado_error_code`, `tado_error_message` et `humidity_alert_blocked_reason`.
+- Session d'authentification commune aux requêtes, y compris après une réautorisation par device code.
 - Décision de chauffage enrichie : présence lorsqu'elle est disponible, tendance sur des mesures distinctes, anticipation horaire, estimation solaire et inertie thermique.
 - Prévisions météo sur cinq jours : anticipation limitée des redoux et refroidissements, avec priorité au confort mesuré.
 - Contrôle de la fraîcheur des mesures Tado et de la météo, avec cache temporaire des prévisions.
@@ -28,10 +31,13 @@ Workflow n8n pour adapter une zone de chauffage Tado à la température intérie
 4. Dans **Lire météo**, remplacer `YOUR_CITY,COUNTRY_CODE`, sélectionner les credentials OpenWeatherMap et conserver **5 Day Forecast** avec le format **Metric** (°C).
 5. Sélectionner les credentials du bot dans les deux nœuds Telegram.
 6. Dans **HTTP Request**, configurer Browserless et remplacer `YOUR_BROWSERLESS_TOKEN`. Ce nœud sert à la récupération de l'authentification Tado par device code.
-7. Vérifier l'authentification, l'état de la zone et la sortie de **Décision chauffage** avant d'exécuter **Appliquer overlay Tado**, qui peut modifier la consigne réelle. Avec des prévisions fraîches et suffisamment complètes, `debug_previsions.utilisables` doit être `true` ; `quality.weather_is_forecast_estimate` indique si la température extérieure est estimée.
-8. Activer le workflow une fois les réglages vérifiés. Le planificateur fonctionne toutes les 30 minutes.
+7. Exécuter **Diagnostic Tado (manuel)**, puis ouvrir **Résultat diagnostic Tado**. Si `HOME_ID` est inconnu, commencer par relever le bon `id` dans `logements_accessibles`, le renseigner et relancer le diagnostic. Choisir ensuite l'`id` de la pièce de type `HEATING` dans `zones_disponibles` et le reporter dans `ZONE_ID`. Ne pas utiliser le rang de la pièce dans la liste.
+8. Relancer le diagnostic jusqu'à obtenir `ZONE_CONFIGUREE_TROUVEE`. Ce résultat confirme l'existence et le type de la pièce, pas encore la disponibilité de ses mesures. La branche de diagnostic n'applique aucune consigne et n'envoie aucun message Telegram. Conserver l'expression du champ `DIAGNOSTIC_TADO` : le déclencheur manuel l'active, le planificateur utilise la branche de chauffage.
+9. Publier/activer le workflow une fois les réglages vérifiés. Le planificateur fonctionne toutes les 30 minutes et peut appliquer une consigne réelle. Consulter sa première exécution : `tado_api_ok` doit être `true`, `quality.humidity_valid` doit être `true` et les mesures doivent être présentes. Lors d'une migration, désactiver l'ancien workflow pour ne garder qu'un contrôleur de la zone.
 
-Les données statiques du workflow conservent les tokens et l'historique de décision dans votre instance. Après un nouvel import, le parcours device code initialise l'authentification.
+Les données statiques conservent les tokens et l'historique dans votre instance lors des exécutions réussies du workflow publié. Les tests manuels ne sauvegardent pas cette mémoire : ils ne permettent pas de confirmer à eux seuls une humidité persistante entre plusieurs exécutions. Après un nouvel import, le parcours device code initialise l'authentification ; une exécution manuelle ne garantit pas que les nouveaux tokens seront conservés pour la prochaine exécution planifiée.
+
+Avec des prévisions fraîches et suffisamment complètes, `debug_previsions.utilisables` doit être `true` ; `quality.weather_is_forecast_estimate` indique si la température extérieure est estimée.
 
 ### Réglages principaux
 
@@ -69,10 +75,13 @@ n8n workflow that adjusts a Tado heating zone based on indoor temperature, weath
 
 ### File
 
-[Tado.json](Tado.json) contains the workflow's 23 nodes. The export is inactive and anonymized: it includes no pinned data, credential identifiers, session tokens or execution state.
+[Tado.json](Tado.json) contains 32 elements: 30 workflow nodes and 2 explanatory sticky notes. The export is inactive and anonymized: it includes no pinned data, credential identifiers, session tokens or execution state.
 
 ### Changes
 
+- Manual Tado account and zone diagnostics, checking `HOME_ID`, `ZONE_ID` and the `HEATING` zone type.
+- Explicit HTTP errors and notification-blocking reasons: `tado_error_code`, `tado_error_message` and `humidity_alert_blocked_reason`.
+- A shared authenticated session for API requests, including after device-code reauthorization.
 - Enhanced heating decisions: occupancy when available, trends based on distinct measurements, schedule anticipation, estimated solar gain and thermal inertia.
 - Five-day weather forecasts: limited anticipation of warming and cooling, with priority given to measured indoor comfort.
 - Freshness checks for Tado measurements and weather data, with a temporary forecast cache.
@@ -89,10 +98,13 @@ n8n workflow that adjusts a Tado heating zone based on indoor temperature, weath
 4. In **Lire météo**, replace `YOUR_CITY,COUNTRY_CODE`, select your OpenWeatherMap credentials and keep **5 Day Forecast** with the **Metric** format (°C).
 5. Select your bot credentials in both Telegram nodes.
 6. In **HTTP Request**, configure Browserless and replace `YOUR_BROWSERLESS_TOKEN`. This node handles Tado authentication through the device code flow.
-7. Check authentication, the zone's state and the output of **Décision chauffage** before running **Appliquer overlay Tado**, which can change the actual setpoint. With fresh forecasts and sufficient time-slot coverage, `debug_previsions.utilisables` should be `true`; `quality.weather_is_forecast_estimate` indicates whether outdoor temperature is estimated.
-8. Activate the workflow once you have checked the settings. The scheduler runs every 30 minutes.
+7. Run **Diagnostic Tado (manuel)** and open **Résultat diagnostic Tado**. If `HOME_ID` is unknown, first find the correct `id` in `logements_accessibles`, configure it and run the diagnostic again. Then select the `id` of the intended `HEATING` room in `zones_disponibles` and enter it as `ZONE_ID`. Do not use the room's position in the list.
+8. Run the diagnostic again until it returns `ZONE_CONFIGUREE_TROUVEE`. This confirms that the room exists and has the correct type, not yet that its measurements are available. The diagnostic branch applies no heating setpoint and sends no Telegram message. Keep the `DIAGNOSTIC_TADO` expression: the manual trigger enables diagnostics, while the scheduler uses the heating branch.
+9. Publish/activate the workflow once the settings are verified. The scheduler runs every 30 minutes and can apply a real setpoint. Inspect its first execution: `tado_api_ok` and `quality.humidity_valid` should be `true`, with actual measurements present. When migrating, deactivate the old workflow so only one controller manages the zone.
 
-The workflow's static data stores tokens and the decision history in your instance. After a fresh import, the device code flow initializes authentication.
+Static data stores tokens and history in your instance after successful executions of the published workflow. Manual tests do not persist this memory: they cannot by themselves confirm sustained humidity across executions. After a fresh import, the device code flow initializes authentication; a manual execution does not guarantee that newly obtained tokens will be retained for the next scheduled execution.
+
+With fresh forecasts and sufficient time-slot coverage, `debug_previsions.utilisables` should be `true`; `quality.weather_is_forecast_estimate` indicates whether outdoor temperature is estimated.
 
 ### Main settings
 
@@ -163,3 +175,73 @@ This entry describes the changes in the **Chauffage** workflow supplied on 2026-
 The forecast cache can be reused during a weather outage while it remains fresh, without artificially extending its retrieval time. When no recent weather observation is available, the nearest slot within three hours provides an outdoor estimate, flagged by `quality.weather_is_forecast_estimate`. If no usable data is available, forecast-based anticipation is disabled while indoor control remains available.
 
 **Validation:** 18 local simulations of **Fusionner données → Décision chauffage** passed, covering response formats, UTC dates, warming, cooling, unchanged setpoints, eco mode, comfort priority, unavailable weather, fresh/expired caches, incomplete time slots, invalid values, manual OFF, open windows and stale sensors. JSON, connections and JavaScript node syntax were also checked. These checks made no service calls and did not change a real heating setpoint.
+
+---
+
+## MAJ du 07/10/2026 : Diagnostic des zones Tado et suivi des alertes d'humidité
+
+### Français
+
+Cette mise à jour intègre les corrections vérifiées les 05 et 07 octobre. Une zone devenue introuvable renvoyait une erreur HTTP `404` : la température et l'humidité intérieures restaient absentes, ce qui empêchait les alertes. Renouveler le token ne pouvait pas corriger le couple `HOME_ID` / `ZONE_ID`. Le diagnostic permet désormais de retrouver les identifiants accessibles et de choisir explicitement la pièce à piloter.
+
+**Diagnostic manuel.** Les nœuds **Diagnostic Tado (manuel)**, **Activer diagnostic** et **Mode diagnostic ?** séparent la vérification initiale des contrôles planifiés. **Lire compte Tado** appelle `GET /api/v2/me`, puis **Lister zones Tado** appelle `GET /api/v2/homes/{HOME_ID}/zones`. **Résultat diagnostic Tado** présente les logements accessibles, les zones avec leur nom et leur type, les codes HTTP, le quota restant lorsqu'il est fourni et les instructions de correction. Il signale aussi un type de zone incompatible avec `HEATING`. Ces deux appels de diagnostic ne sont pas ajoutés à chaque contrôle planifié et aucune autre pièce n'est sélectionnée automatiquement.
+
+**Authentification.** Le nouveau nœud **Session Tado** fournit le token aux lectures du compte, des zones et de l'état ainsi qu'à l'application de la consigne. Après une réautorisation réussie, **Code in JavaScript** rejoint **Vérification Token** puis **Session Tado**, sans rafraîchir immédiatement le token qui vient d'être obtenu. Toutes ces requêtes utilisent ainsi la session validée pour cette exécution.
+
+**Erreurs explicites.** Les requêtes d'état et d'overlay conservent le corps, les en-têtes et le code HTTP, même en cas d'erreur HTTP. Les exceptions réseau continuent d'être transmises comme erreurs. **Fusionner données** renseigne `tado_http_status`, `tado_error_code`, `tado_error_message` et `tado_error_detail` ; **Décision chauffage** et le journal rendent la cause visible. Un échec de lecture laisse les mesures inconnues et n'envoie aucune nouvelle consigne.
+
+| Situation lors de la lecture d'état | Diagnostic |
+|---|---|
+| HTTP `404` | `TADO_ZONE_INTROUVABLE` : vérifier le logement et la zone |
+| HTTP `401` | `TADO_AUTHENTIFICATION_REFUSEE` |
+| HTTP `403` | `TADO_ACCES_REFUSE` |
+| HTTP `429` | `TADO_QUOTA_ATTEINT` : consulter `quality.tado_rate_limit` |
+| Autre erreur HTTP ou réseau | `TADO_REQUETE_EN_ECHEC` |
+| Appareil hors ligne | `TADO_APPAREIL_HORS_LIGNE` |
+| Réponse sans données de capteur | `TADO_MESURES_ABSENTES` |
+
+**Pourquoi une alerte n'est pas encore envoyée.** Le nouveau champ `humidity_alert_blocked_reason` précise si la mesure manque, si l'humidité est dans les seuils, si la confirmation est en attente (`CONFIRMATION_EN_ATTENTE`) ou si le délai entre alertes s'applique (`DELAI_ENTRE_ALERTES`). Le texte `alertMessage` peut être préparé alors que `sendHumAlert` vaut encore `false` : seul ce booléen autorise le passage vers Telegram.
+
+Les seuils existants sont conservés : ≤30 % ou ≥60 %, avec au moins deux mesures distinctes couvrant 30 minutes pour un avertissement. Les seuils critiques sont ≤25 % ou ≥70 %, avec deux mesures couvrant 5 minutes. Les valeurs extrêmes ≤15 % ou ≥85 % peuvent contourner cette confirmation, mais respectent toujours le délai entre alertes. Un changement de catégorie ou de sévérité recommence la confirmation ; l'hystérésis évite les oscillations près des seuils. Les rappels restent à 12 heures pour un avertissement et 6 heures pour une alerte critique persistante, avec les règles existantes de nouvel épisode et d'aggravation. Un contrôle toutes les 30 minutes ne produit pas d'alerte intermédiaire au bout de 5 minutes.
+
+La confirmation utilise les horodatages des mesures du capteur : répéter la même mesure n'augmente pas le compteur. Le workflow doit être publié et exécuté automatiquement pour conserver son historique. L'horodatage d'une alerte reste mémorisé uniquement après confirmation de son envoi par Telegram.
+
+**Export public.** Les identifiants de compte, mot de passe, logement, zone, chat Telegram et token Browserless sont remplacés par des champs `YOUR_*`. Les coordonnées sont neutres, la ville météo est à renseigner, les références de credentials sont retirées et aucun token, état d'exécution ou donnée épinglée n'est publié. Les prévisions sur cinq jours, les règles de confort et les alertes de fenêtre ouverte restent en place.
+
+**Validation.** Les 32 vérifications et simulations locales ont réussi : structure, syntaxe, diagnostics de zone, erreurs HTTP, mesures absentes ou périmées, confirmation d'humidité et rappels. Elles ne constituent pas un test réel de l'envoi Telegram ou d'une commande de chauffage. Le diagnostic de zone et la reprise des mesures ont été confirmés sur l'installation cible ; l'absence d'alerte sur la première mesure anormale correspondait à l'attente de confirmation.
+
+### English — Update 2026-10-07: Tado zone diagnostics and humidity alert status
+
+This update integrates the fixes checked on October 5 and 7. An unavailable zone returned HTTP `404`, leaving indoor temperature and humidity unavailable and preventing alerts. Refreshing a token could not repair an invalid `HOME_ID` / `ZONE_ID` pair. The diagnostic now lists accessible identifiers so the intended room can be selected explicitly.
+
+**Manual diagnostics.** **Diagnostic Tado (manuel)**, **Activer diagnostic** and **Mode diagnostic ?** separate initial verification from scheduled control. **Lire compte Tado** calls `GET /api/v2/me`, then **Lister zones Tado** calls `GET /api/v2/homes/{HOME_ID}/zones`. **Résultat diagnostic Tado** reports accessible homes, zone names and types, HTTP status codes, remaining quota when available and corrective instructions. It also flags zone types incompatible with `HEATING`. These two diagnostic calls are not added to each scheduled check, and the workflow never automatically switches to another room.
+
+**Authentication.** The new **Session Tado** node supplies the token for account, zone and state reads and for applying a setpoint. After successful reauthorization, **Code in JavaScript** connects to **Vérification Token** and then **Session Tado**, without immediately refreshing the newly issued token. All these requests use the session validated for the current execution.
+
+**Explicit errors.** State and overlay requests retain their response body, headers and HTTP status even on HTTP errors. Network exceptions are still forwarded as errors. **Fusionner données** exposes `tado_http_status`, `tado_error_code`, `tado_error_message` and `tado_error_detail`; **Décision chauffage** and the log make the cause visible. Failed state reads leave measurements unknown and do not send a new heating setpoint.
+
+| State-read condition | Diagnostic |
+|---|---|
+| HTTP `404` | `TADO_ZONE_INTROUVABLE`: check home and zone identifiers |
+| HTTP `401` | `TADO_AUTHENTIFICATION_REFUSEE` |
+| HTTP `403` | `TADO_ACCES_REFUSE` |
+| HTTP `429` | `TADO_QUOTA_ATTEINT`: inspect `quality.tado_rate_limit` |
+| Other HTTP or network errors | `TADO_REQUETE_EN_ECHEC` |
+| Offline device | `TADO_APPAREIL_HORS_LIGNE` |
+| Response without sensor data | `TADO_MESURES_ABSENTES` |
+
+**Why an alert has not been sent yet.** `humidity_alert_blocked_reason` identifies missing measurements, humidity within thresholds, pending confirmation (`CONFIRMATION_EN_ATTENTE`) or an active cooldown (`DELAI_ENTRE_ALERTES`). `alertMessage` may already contain prepared text while `sendHumAlert` is still `false`; only this boolean allows the Telegram branch to run.
+
+Existing thresholds are retained: ≤30% or ≥60%, with at least two distinct measurements spanning 30 minutes for a warning. Critical thresholds are ≤25% or ≥70%, with two measurements spanning 5 minutes. Extreme values ≤15% or ≥85% can bypass confirmation, but still respect alert cooldowns. Changing category or severity restarts confirmation; hysteresis avoids oscillation near thresholds. Reminders remain 12 hours for warnings and 6 hours for persistent critical alerts, with the existing new-episode and escalation rules. A 30-minute polling schedule cannot deliver an intermediate check after just 5 minutes.
+
+Confirmation uses sensor measurement timestamps: reading the same sample repeatedly does not increment the counter. Publish the workflow and let it run automatically to retain its history. Alert timestamps are still recorded only after Telegram confirms delivery.
+
+**Public export.** Account, password, home, zone, Telegram chat and Browserless token values are replaced with `YOUR_*` placeholders. Coordinates are neutral, the weather city must be configured, credential references are removed and no token, execution state or pinned data is published. Five-day forecasts, comfort rules and open-window alerts remain available.
+
+**Validation.** All 32 local checks and simulations passed, covering structure, syntax, zone diagnostics, HTTP errors, missing or stale measurements, humidity confirmation and reminders. They are not live tests of Telegram delivery or heating commands. Zone diagnostics and restored sensor readings were confirmed on the target installation; no alert on the first abnormal sample was the expected confirmation delay.
+
+### Références / References
+
+- [Tado — REST API](https://help.tado.com/en/collections/15124268-rest-api)
+- [Tado — Device code authentication and refresh tokens](https://help.tado.com/en/articles/8565472-how-do-i-authenticate-to-access-the-rest-api)
+- [n8n — getWorkflowStaticData](https://docs.n8n.io/build/code-in-n8n/cookbook/built-in-methods-and-variables-examples/getworkflowstaticdata)

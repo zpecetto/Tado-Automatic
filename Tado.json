@@ -1,5 +1,5 @@
 {
-  "name": "Tado - Chauffage, humidité et fenêtres",
+  "name": "Tado-Automatic",
   "nodes": [
     {
       "parameters": {
@@ -15,8 +15,8 @@
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.3,
       "position": [
-        -1360,
-        1168
+        -1420,
+        1040
       ],
       "id": "06711485-76ea-54ad-bac0-26e859d6eaf7",
       "name": "Schedule Trigger1"
@@ -28,8 +28,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -688,
-        1168
+        -740,
+        1040
       ],
       "id": "1edf5175-459c-53ce-972d-dcef1052efa8",
       "name": "Tado Refresh Token"
@@ -42,14 +42,16 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "=Bearer {{$json.access_token}}"
+              "value": "={{ 'Bearer ' + $('Session Tado').first().json.access_token }}"
             }
           ]
         },
         "options": {
           "response": {
             "response": {
-              "fullResponse": true
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
             }
           },
           "timeout": 20000
@@ -58,8 +60,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        -240,
-        992
+        180,
+        1040
       ],
       "id": "27c02b09-e4cc-5609-943b-fb31386829d5",
       "name": "Lire état zone Tado",
@@ -75,8 +77,8 @@
       "type": "n8n-nodes-base.openWeatherMap",
       "typeVersion": 1,
       "position": [
-        -16,
-        992
+        400,
+        1040
       ],
       "id": "692fa5af-05cd-59af-9266-4e9194ca64ba",
       "name": "Lire météo",
@@ -84,26 +86,26 @@
     },
     {
       "parameters": {
-        "jsCode": "// Mode: Run Once for All Items.\n// \"Lire météo\": 5 Day Forecast, Metric (Celsius).\n// Keep missing measurements unknown.\n// A failed weather request must not disable indoor control.\n\nconst store = $getWorkflowStaticData('global');\nconst housing = $('Configuration Logement').first().json;\nconst config = $('Configuration Tado').first().json;\nconst tadoResponse = $('Lire état zone Tado').first().json;\nconst now = Date.now();\nconst HOUR = 3600000;\n\nconst key = `${config.HOME_ID}:${config.ZONE_ID}`;\n\nstore.climate_v2 ??= {};\nconst state = store.climate_v2[key] ??= {};\n\nfunction number(value, min, max) {\n  if (\n    !['number', 'string'].includes(typeof value) ||\n    String(value).trim() === ''\n  ) {\n    return null;\n  }\n\n  const n = Number(String(value).replace(',', '.'));\n\n  return Number.isFinite(n) && n >= min && n <= max ? n : null;\n}\n\nfunction timestamp(value) {\n  if (\n    !['number', 'string'].includes(typeof value) ||\n    String(value).trim() === ''\n  ) {\n    return null;\n  }\n\n  const raw = String(value).trim();\n\n  if (/^\\d+(?:\\.\\d+)?$/.test(raw)) {\n    const n = Number(raw);\n    return Number.isFinite(n) ? (n < 1e11 ? n * 1000 : n) : null;\n  }\n\n  // OpenWeatherMap dt_txt is UTC even without a timezone suffix.\n  const normalized = /^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$/.test(raw)\n    ? raw.replace(' ', 'T') + 'Z'\n    : raw;\n\n  const parsed = Date.parse(normalized);\n\n  return Number.isFinite(parsed) ? parsed : null;\n}\n\nconst maxSensorAge = number(\n  housing.SENSOR_MAX_AGE_MINUTES,\n  5,\n  1440\n) ?? 90;\n\nconst maxWeatherAge = number(\n  housing.WEATHER_MAX_AGE_MINUTES,\n  5,\n  1440\n) ?? 120;\n\nconst maxForecastAge = number(\n  housing.FORECAST_MAX_AGE_MINUTES,\n  30,\n  720\n) ?? 180;\n\nconst fresh = (ts, age) =>\n  ts !== null &&\n  ts <= now + 300000 &&\n  now - ts <= age * 60000;\n\n// Read and validate indoor measurements.\nconst tado = tadoResponse.body ?? tadoResponse;\n\nconst apiOk =\n  !tadoResponse.error &&\n  !tado.error &&\n  !(Number(tadoResponse.statusCode) >= 400) &&\n  !!tado.sensorDataPoints &&\n  !['OFFLINE', 'DISCONNECTED'].includes(\n    String(tado.link?.state).toUpperCase()\n  );\n\nconst inside = tado.sensorDataPoints?.insideTemperature;\nconst humidity = tado.sensorDataPoints?.humidity;\n\nconst insideTs = timestamp(inside?.timestamp);\nconst humidityTs = timestamp(humidity?.timestamp);\n\nconst temp = number(inside?.celsius, -10, 50);\nconst rh = number(humidity?.percentage, 1, 100);\n\n// Older API payloads sometimes omit timestamps.\n// The successful read is then the only available time reference.\nconst tempValid =\n  apiOk &&\n  temp !== null &&\n  (insideTs === null || fresh(insideTs, maxSensorAge));\n\nconst humidityValid =\n  apiOk &&\n  rh !== null &&\n  (humidityTs === null || fresh(humidityTs, maxSensorAge));\n\n// Forecast timestamps describe the future, not observation times.\n// Cache age is measured from the successful fetch.\nconst weatherItems = $('Lire météo').all().map(item => item.json ?? {});\nconst rawForecast = [];\n\nlet currentWeather = null;\nlet forecastCity = null;\n\nfunction normalizeForecast(rows) {\n  const points = new Map();\n\n  for (const row of rows) {\n    if (!row || typeof row !== 'object') continue;\n\n    const ts = timestamp(row.dt) ?? timestamp(row.dt_txt);\n    const temperature = number(row.main?.temp, -60, 60);\n\n    if (\n      ts === null ||\n      temperature === null ||\n      ts < now - 3 * HOUR ||\n      ts > now + 120 * HOUR\n    ) {\n      continue;\n    }\n\n    points.set(ts, {\n      ts,\n      temp: temperature,\n      humidity: number(row.main?.humidity, 1, 100),\n      clouds: number(row.clouds?.all, 0, 100),\n      wind: number(row.wind?.speed, 0, 80),\n      rain_probability: number(row.pop, 0, 1),\n\n      description: typeof row.weather?.[0]?.description === 'string'\n        ? row.weather[0].description\n        : 'indisponible',\n\n      condition: typeof row.weather?.[0]?.main === 'string'\n        ? row.weather[0].main\n        : 'Unknown'\n    });\n  }\n\n  return [...points.values()].sort((a, b) => a.ts - b.ts);\n}\n\nfor (const response of weatherItems) {\n  const weather = response.body ?? response;\n\n  if (\n    !weather ||\n    typeof weather !== 'object' ||\n    response.error ||\n    weather.error ||\n    Number(response.statusCode) >= 400 ||\n    (weather.cod !== undefined && String(weather.cod) !== '200')\n  ) {\n    continue;\n  }\n\n  if (Array.isArray(weather.list)) {\n    rawForecast.push(...weather.list);\n    forecastCity = weather.city ?? forecastCity;\n  } else if (Array.isArray(weather)) {\n    rawForecast.push(...weather);\n  } else if (\n    weather.dt_txt !== undefined ||\n    weather.sys?.pod !== undefined ||\n    weatherItems.length > 1 ||\n    timestamp(weather.dt) > now + 300000\n  ) {\n    rawForecast.push(weather);\n  } else if (\n    number(weather.main?.temp, -60, 60) !== null &&\n    fresh(timestamp(weather.dt), maxWeatherAge)\n  ) {\n    currentWeather = weather;\n  }\n}\n\nconst incomingForecast = normalizeForecast(rawForecast);\n\nlet forecastSource = 'unavailable';\n\nif (incomingForecast.some(point => point.ts >= now)) {\n  state.forecast = {\n    points: incomingForecast,\n    fetchedAt: now,\n    city: forecastCity\n  };\n\n  forecastSource = 'live';\n} else if (\n  state.forecast &&\n  fresh(\n    number(state.forecast.fetchedAt, 0, 1e15),\n    maxForecastAge\n  )\n) {\n  forecastSource = 'cached';\n}\n\nlet forecast = forecastSource === 'unavailable'\n  ? []\n  : (Array.isArray(state.forecast.points) ? state.forecast.points : [])\n      .filter(point =>\n        point &&\n        Number.isFinite(point.ts) &&\n        Number.isFinite(point.temp) &&\n        point.temp >= -60 &&\n        point.temp <= 60 &&\n        point.ts >= now - 3 * HOUR &&\n        point.ts <= now + 120 * HOUR\n      )\n      .sort((a, b) => a.ts - b.ts);\n\nif (!forecast.some(point => point.ts >= now)) {\n  forecast = [];\n  forecastSource = 'unavailable';\n}\n\nconst nearestForecast = forecast\n  .filter(point => Math.abs(point.ts - now) <= 3 * HOUR)\n  .reduce(\n    (best, point) =>\n      best === null || Math.abs(point.ts - now) < Math.abs(best.ts - now)\n        ? point\n        : best,\n    null\n  );\n\nlet weatherSource = 'unavailable';\nlet meteo = {};\n\nif (currentWeather !== null) {\n  state.weather = {\n    value: currentWeather,\n    observedAt: timestamp(currentWeather.dt)\n  };\n\n  weatherSource = 'current';\n  meteo = currentWeather;\n} else if (\n  state.weather &&\n  fresh(state.weather.observedAt, maxWeatherAge) &&\n  number(state.weather.value?.main?.temp, -60, 60) !== null\n) {\n  weatherSource = 'cached';\n  meteo = state.weather.value;\n} else if (nearestForecast !== null) {\n  weatherSource = forecastSource === 'live'\n    ? 'forecast_estimate'\n    : 'cached_forecast_estimate';\n\n  meteo = {\n    main: {\n      temp: nearestForecast.temp,\n      humidity: nearestForecast.humidity\n    },\n    clouds: {\n      all: nearestForecast.clouds\n    },\n    wind: {\n      speed: nearestForecast.wind\n    },\n    weather: [{\n      description: nearestForecast.description,\n      main: nearestForecast.condition\n    }],\n    sys: {\n      sunset: state.forecast.city?.sunset\n    }\n  };\n}\n\nconst forecastEstimate = weatherSource.endsWith('forecast_estimate');\n\nconst forecastFetchTs = forecastSource === 'unavailable'\n  ? null\n  : state.forecast.fetchedAt;\n\n// Interpret native Tado window signals.\nfunction windowFlag(value) {\n  if (typeof value === 'boolean') return value;\n  if (value === 'true') return true;\n  if (value === 'false') return false;\n  if (!value || typeof value !== 'object') return null;\n\n  const expiry = timestamp(value.expiry ?? value.expiresAt ?? value.end);\n\n  if (expiry !== null && expiry <= now) return false;\n\n  for (const field of ['detected', 'isOpen', 'open', 'active']) {\n    if (typeof value[field] === 'boolean') return value[field];\n  }\n\n  if (['CLOSED', 'INACTIVE'].includes(value.state)) return false;\n  if (['OPEN', 'ACTIVE'].includes(value.state)) return true;\n  if (expiry !== null) return expiry > now;\n\n  const detectedAt = timestamp(value.detectedTime ?? value.detectedAt);\n  const duration = number(value.durationInSeconds, 1, 86400);\n\n  if (detectedAt !== null && duration !== null) {\n    return detectedAt <= now && now < detectedAt + duration * 1000;\n  }\n\n  // Settings objects, empty objects and undated events are not proof of an open window.\n  return null;\n}\n\nconst flag = windowFlag(tado.openWindowDetected);\nconst overlayFlag = windowFlag(tado.openWindow);\n\nlet windowOpen = null;\n\nif (apiOk) {\n  if (flag === true || overlayFlag === true) {\n    windowOpen = true;\n  } else if (\n    flag === false ||\n    overlayFlag === false ||\n    tado.openWindow === null\n  ) {\n    windowOpen = false;\n  }\n}\n\nconst geo = ['HOME', 'AWAY'].includes(tado.geolocationOverride)\n  ? tado.geolocationOverride\n  : tado.tadoMode;\n\nreturn [{\n  json: {\n    zone_key: key,\n    fetched_at: now,\n\n    temp_interieure: tempValid ? temp : null,\n    humidite_interieure: humidityValid ? rh : null,\n    temperature_sample_ts: tempValid ? insideTs ?? now : null,\n    humidity_sample_ts: humidityValid ? humidityTs ?? now : null,\n\n    consigne_actuelle: number(tado.setting?.temperature?.celsius, 0, 40),\n\n    power_actuel: ['ON', 'OFF'].includes(tado.setting?.power)\n      ? tado.setting.power\n      : 'UNKNOWN',\n\n    tado_api_ok: apiOk,\n    presence: geo === 'HOME' ? true : geo === 'AWAY' ? false : null,\n\n    heating_power_percent: number(\n      tado.activityDataPoints?.heatingPower?.percentage,\n      0,\n      100\n    ),\n\n    window_open_detected: windowOpen,\n\n    window_event_ts: timestamp(\n      tado.openWindow?.detectedTime ??\n      tado.openWindowDetected?.detectedTime\n    ),\n\n    temp_exterieure: number(meteo.main?.temp, -60, 60),\n    humidite_pourcent: number(meteo.main?.humidity, 1, 100),\n    nuages_pourcent: number(meteo.clouds?.all, 0, 100),\n    vitesse_vent_ms: number(meteo.wind?.speed, 0, 80),\n\n    condition_meteo: meteo.weather?.[0]?.description ?? 'indisponible',\n    condition_meteo_main: meteo.weather?.[0]?.main ?? 'Unknown',\n    sunset_ts: timestamp(meteo.sys?.sunset),\n\n    previsions_meteo: forecast,\n\n    quality: {\n      indoor_valid: tempValid,\n      humidity_valid: humidityValid,\n\n      sensor_timestamps_available:\n        insideTs !== null && humidityTs !== null,\n\n      tado_rate_limit: tadoResponse.headers?.ratelimit ?? null,\n\n      weather_source: weatherSource,\n      weather_is_forecast_estimate: forecastEstimate,\n\n      weather_forecast_offset_hours: forecastEstimate\n        ? Number(((nearestForecast.ts - now) / HOUR).toFixed(2))\n        : null,\n\n      weather_age_minutes: weatherSource === 'unavailable'\n        ? null\n        : Math.max(\n            0,\n            Math.round(\n              (\n                now -\n                (\n                  forecastEstimate\n                    ? forecastFetchTs\n                    : state.weather.observedAt\n                )\n              ) / 60000\n            )\n          ),\n\n      forecast_source: forecastSource,\n      forecast_fetched_at: forecastFetchTs,\n\n      forecast_age_minutes: forecastFetchTs === null\n        ? null\n        : Math.max(0, Math.round((now - forecastFetchTs) / 60000)),\n\n      forecast_count: forecast.length,\n      forecast_until: forecast.length ? forecast.at(-1).ts : null\n    }\n  }\n}];"
+        "jsCode": "// Mode: Run Once for All Items.\n// \"Lire météo\": 5 Day Forecast, Metric (Celsius).\n// Keep missing measurements unknown.\n// A failed weather request must not disable indoor control.\n\nconst store = $getWorkflowStaticData('global');\nconst housing = $('Configuration Logement').first().json;\nconst config = $('Configuration Tado').first().json;\nconst tadoResponse = $('Lire état zone Tado').first().json;\nconst now = Date.now();\nconst HOUR = 3600000;\n\nconst key = `${config.HOME_ID}:${config.ZONE_ID}`;\n\nstore.climate_v2 ??= {};\nconst state = store.climate_v2[key] ??= {};\n\nfunction number(value, min, max) {\n  if (\n    !['number', 'string'].includes(typeof value) ||\n    String(value).trim() === ''\n  ) {\n    return null;\n  }\n\n  const n = Number(String(value).replace(',', '.'));\n\n  return Number.isFinite(n) && n >= min && n <= max ? n : null;\n}\n\nfunction timestamp(value) {\n  if (\n    !['number', 'string'].includes(typeof value) ||\n    String(value).trim() === ''\n  ) {\n    return null;\n  }\n\n  const raw = String(value).trim();\n\n  if (/^\\d+(?:\\.\\d+)?$/.test(raw)) {\n    const n = Number(raw);\n    return Number.isFinite(n) ? (n < 1e11 ? n * 1000 : n) : null;\n  }\n\n  // OpenWeatherMap dt_txt is UTC even without a timezone suffix.\n  const normalized = /^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$/.test(raw)\n    ? raw.replace(' ', 'T') + 'Z'\n    : raw;\n\n  const parsed = Date.parse(normalized);\n\n  return Number.isFinite(parsed) ? parsed : null;\n}\n\nconst maxSensorAge = number(\n  housing.SENSOR_MAX_AGE_MINUTES,\n  5,\n  1440\n) ?? 90;\n\nconst maxWeatherAge = number(\n  housing.WEATHER_MAX_AGE_MINUTES,\n  5,\n  1440\n) ?? 120;\n\nconst maxForecastAge = number(\n  housing.FORECAST_MAX_AGE_MINUTES,\n  30,\n  720\n) ?? 180;\n\nconst fresh = (ts, age) =>\n  ts !== null &&\n  ts <= now + 300000 &&\n  now - ts <= age * 60000;\n\n// Read and validate indoor measurements.\nlet tado = tadoResponse.body ?? tadoResponse;\nif (typeof tado === 'string') {\n  try { tado = JSON.parse(tado); } catch { tado = {}; }\n}\nif (!tado || typeof tado !== 'object' || Array.isArray(tado)) tado = {};\nconst rawHttpStatus = Number(tadoResponse.statusCode ?? tadoResponse.error?.status ?? tadoResponse.error?.statusCode);\nconst tadoHttpStatus = Number.isFinite(rawHttpStatus) && rawHttpStatus > 0 ? rawHttpStatus : null;\nconst tadoApiErrors = Array.isArray(tado.errors) ? tado.errors : [];\nconst tadoErrorDetail = tadoApiErrors.map(e => e.title ?? e.message ?? e.code).filter(Boolean).join(' ; ') ||\n  tado.error?.message || tadoResponse.error?.message || null;\nlet tadoErrorCode = null;\nlet tadoErrorMessage = null;\nif (tadoHttpStatus === 404) {\n  tadoErrorCode = 'TADO_ZONE_INTROUVABLE';\n  tadoErrorMessage = `La zone ${config.ZONE_ID} du logement ${config.HOME_ID} est introuvable pour cet appel. Exécuter Diagnostic Tado (manuel), puis vérifier HOME_ID et ZONE_ID dans Configuration Tado.`;\n} else if (tadoHttpStatus === 401) {\n  tadoErrorCode = 'TADO_AUTHENTIFICATION_REFUSEE';\n  tadoErrorMessage = 'Token refusé par Tado. Vérifier la prochaine authentification.';\n} else if (tadoHttpStatus === 403) {\n  tadoErrorCode = 'TADO_ACCES_REFUSE';\n  tadoErrorMessage = 'Accès refusé : vérifier les droits du compte sur le logement.';\n} else if (tadoHttpStatus === 429) {\n  tadoErrorCode = 'TADO_QUOTA_ATTEINT';\n  tadoErrorMessage = 'Quota Tado atteint. Consulter quality.tado_rate_limit et attendre son renouvellement.';\n} else if (tadoResponse.error || tado.error || tadoApiErrors.length || tadoHttpStatus >= 400) {\n  tadoErrorCode = 'TADO_REQUETE_EN_ECHEC';\n  tadoErrorMessage = 'La requête Tado a échoué. Consulter tado_error_detail.';\n} else if (['OFFLINE', 'DISCONNECTED'].includes(String(tado.link?.state).toUpperCase())) {\n  tadoErrorCode = 'TADO_APPAREIL_HORS_LIGNE';\n  tadoErrorMessage = 'Tado signale que l’appareil est hors ligne.';\n} else if (!tado.sensorDataPoints) {\n  tadoErrorCode = 'TADO_MESURES_ABSENTES';\n  tadoErrorMessage = 'La réponse Tado ne contient pas sensorDataPoints.';\n}\n\nconst apiOk =\n  !tadoResponse.error &&\n  !tado.error &&\n  tadoApiErrors.length === 0 &&\n  !(tadoHttpStatus >= 400) &&\n  !!tado.sensorDataPoints &&\n  !['OFFLINE', 'DISCONNECTED'].includes(\n    String(tado.link?.state).toUpperCase()\n  );\n\nconst inside = tado.sensorDataPoints?.insideTemperature;\nconst humidity = tado.sensorDataPoints?.humidity;\n\nconst insideTs = timestamp(inside?.timestamp);\nconst humidityTs = timestamp(humidity?.timestamp);\n\nconst temp = number(inside?.celsius, -10, 50);\nconst rh = number(humidity?.percentage, 1, 100);\n\n// Older API payloads sometimes omit timestamps.\n// The successful read is then the only available time reference.\nconst tempValid =\n  apiOk &&\n  temp !== null &&\n  (insideTs === null || fresh(insideTs, maxSensorAge));\n\nconst humidityValid =\n  apiOk &&\n  rh !== null &&\n  (humidityTs === null || fresh(humidityTs, maxSensorAge));\n\n// Forecast timestamps describe the future, not observation times.\n// Cache age is measured from the successful fetch.\nconst weatherItems = $('Lire météo').all().map(item => item.json ?? {});\nconst rawForecast = [];\n\nlet currentWeather = null;\nlet forecastCity = null;\n\nfunction normalizeForecast(rows) {\n  const points = new Map();\n\n  for (const row of rows) {\n    if (!row || typeof row !== 'object') continue;\n\n    const ts = timestamp(row.dt) ?? timestamp(row.dt_txt);\n    const temperature = number(row.main?.temp, -60, 60);\n\n    if (\n      ts === null ||\n      temperature === null ||\n      ts < now - 3 * HOUR ||\n      ts > now + 120 * HOUR\n    ) {\n      continue;\n    }\n\n    points.set(ts, {\n      ts,\n      temp: temperature,\n      humidity: number(row.main?.humidity, 1, 100),\n      clouds: number(row.clouds?.all, 0, 100),\n      wind: number(row.wind?.speed, 0, 80),\n      rain_probability: number(row.pop, 0, 1),\n\n      description: typeof row.weather?.[0]?.description === 'string'\n        ? row.weather[0].description\n        : 'indisponible',\n\n      condition: typeof row.weather?.[0]?.main === 'string'\n        ? row.weather[0].main\n        : 'Unknown'\n    });\n  }\n\n  return [...points.values()].sort((a, b) => a.ts - b.ts);\n}\n\nfor (const response of weatherItems) {\n  const weather = response.body ?? response;\n\n  if (\n    !weather ||\n    typeof weather !== 'object' ||\n    response.error ||\n    weather.error ||\n    Number(response.statusCode) >= 400 ||\n    (weather.cod !== undefined && String(weather.cod) !== '200')\n  ) {\n    continue;\n  }\n\n  if (Array.isArray(weather.list)) {\n    rawForecast.push(...weather.list);\n    forecastCity = weather.city ?? forecastCity;\n  } else if (Array.isArray(weather)) {\n    rawForecast.push(...weather);\n  } else if (\n    weather.dt_txt !== undefined ||\n    weather.sys?.pod !== undefined ||\n    weatherItems.length > 1 ||\n    timestamp(weather.dt) > now + 300000\n  ) {\n    rawForecast.push(weather);\n  } else if (\n    number(weather.main?.temp, -60, 60) !== null &&\n    fresh(timestamp(weather.dt), maxWeatherAge)\n  ) {\n    currentWeather = weather;\n  }\n}\n\nconst incomingForecast = normalizeForecast(rawForecast);\n\nlet forecastSource = 'unavailable';\n\nif (incomingForecast.some(point => point.ts >= now)) {\n  state.forecast = {\n    points: incomingForecast,\n    fetchedAt: now,\n    city: forecastCity\n  };\n\n  forecastSource = 'live';\n} else if (\n  state.forecast &&\n  fresh(\n    number(state.forecast.fetchedAt, 0, 1e15),\n    maxForecastAge\n  )\n) {\n  forecastSource = 'cached';\n}\n\nlet forecast = forecastSource === 'unavailable'\n  ? []\n  : (Array.isArray(state.forecast.points) ? state.forecast.points : [])\n      .filter(point =>\n        point &&\n        Number.isFinite(point.ts) &&\n        Number.isFinite(point.temp) &&\n        point.temp >= -60 &&\n        point.temp <= 60 &&\n        point.ts >= now - 3 * HOUR &&\n        point.ts <= now + 120 * HOUR\n      )\n      .sort((a, b) => a.ts - b.ts);\n\nif (!forecast.some(point => point.ts >= now)) {\n  forecast = [];\n  forecastSource = 'unavailable';\n}\n\nconst nearestForecast = forecast\n  .filter(point => Math.abs(point.ts - now) <= 3 * HOUR)\n  .reduce(\n    (best, point) =>\n      best === null || Math.abs(point.ts - now) < Math.abs(best.ts - now)\n        ? point\n        : best,\n    null\n  );\n\nlet weatherSource = 'unavailable';\nlet meteo = {};\n\nif (currentWeather !== null) {\n  state.weather = {\n    value: currentWeather,\n    observedAt: timestamp(currentWeather.dt)\n  };\n\n  weatherSource = 'current';\n  meteo = currentWeather;\n} else if (\n  state.weather &&\n  fresh(state.weather.observedAt, maxWeatherAge) &&\n  number(state.weather.value?.main?.temp, -60, 60) !== null\n) {\n  weatherSource = 'cached';\n  meteo = state.weather.value;\n} else if (nearestForecast !== null) {\n  weatherSource = forecastSource === 'live'\n    ? 'forecast_estimate'\n    : 'cached_forecast_estimate';\n\n  meteo = {\n    main: {\n      temp: nearestForecast.temp,\n      humidity: nearestForecast.humidity\n    },\n    clouds: {\n      all: nearestForecast.clouds\n    },\n    wind: {\n      speed: nearestForecast.wind\n    },\n    weather: [{\n      description: nearestForecast.description,\n      main: nearestForecast.condition\n    }],\n    sys: {\n      sunset: state.forecast.city?.sunset\n    }\n  };\n}\n\nconst forecastEstimate = weatherSource.endsWith('forecast_estimate');\n\nconst forecastFetchTs = forecastSource === 'unavailable'\n  ? null\n  : state.forecast.fetchedAt;\n\n// Interpret native Tado window signals.\nfunction windowFlag(value) {\n  if (typeof value === 'boolean') return value;\n  if (value === 'true') return true;\n  if (value === 'false') return false;\n  if (!value || typeof value !== 'object') return null;\n\n  const expiry = timestamp(value.expiry ?? value.expiresAt ?? value.end);\n\n  if (expiry !== null && expiry <= now) return false;\n\n  for (const field of ['detected', 'isOpen', 'open', 'active']) {\n    if (typeof value[field] === 'boolean') return value[field];\n  }\n\n  if (['CLOSED', 'INACTIVE'].includes(value.state)) return false;\n  if (['OPEN', 'ACTIVE'].includes(value.state)) return true;\n  if (expiry !== null) return expiry > now;\n\n  const detectedAt = timestamp(value.detectedTime ?? value.detectedAt);\n  const duration = number(value.durationInSeconds, 1, 86400);\n\n  if (detectedAt !== null && duration !== null) {\n    return detectedAt <= now && now < detectedAt + duration * 1000;\n  }\n\n  // Settings objects, empty objects and undated events are not proof of an open window.\n  return null;\n}\n\nconst flag = windowFlag(tado.openWindowDetected);\nconst overlayFlag = windowFlag(tado.openWindow);\n\nlet windowOpen = null;\n\nif (apiOk) {\n  if (flag === true || overlayFlag === true) {\n    windowOpen = true;\n  } else if (\n    flag === false ||\n    overlayFlag === false ||\n    tado.openWindow === null\n  ) {\n    windowOpen = false;\n  }\n}\n\nconst geo = ['HOME', 'AWAY'].includes(tado.geolocationOverride)\n  ? tado.geolocationOverride\n  : tado.tadoMode;\n\nreturn [{\n  json: {\n    zone_key: key,\n    fetched_at: now,\n\n    temp_interieure: tempValid ? temp : null,\n    humidite_interieure: humidityValid ? rh : null,\n    temperature_sample_ts: tempValid ? insideTs ?? now : null,\n    humidity_sample_ts: humidityValid ? humidityTs ?? now : null,\n\n    consigne_actuelle: number(tado.setting?.temperature?.celsius, 0, 40),\n\n    power_actuel: ['ON', 'OFF'].includes(tado.setting?.power)\n      ? tado.setting.power\n      : 'UNKNOWN',\n\n    tado_api_ok: apiOk,\n    tado_http_status: tadoHttpStatus,\n    tado_error_code: tadoErrorCode,\n    tado_error_message: tadoErrorMessage,\n    tado_error_detail: tadoErrorDetail,\n    presence: geo === 'HOME' ? true : geo === 'AWAY' ? false : null,\n\n    heating_power_percent: number(\n      tado.activityDataPoints?.heatingPower?.percentage,\n      0,\n      100\n    ),\n\n    window_open_detected: windowOpen,\n\n    window_event_ts: timestamp(\n      tado.openWindow?.detectedTime ??\n      tado.openWindowDetected?.detectedTime\n    ),\n\n    temp_exterieure: number(meteo.main?.temp, -60, 60),\n    humidite_pourcent: number(meteo.main?.humidity, 1, 100),\n    nuages_pourcent: number(meteo.clouds?.all, 0, 100),\n    vitesse_vent_ms: number(meteo.wind?.speed, 0, 80),\n\n    condition_meteo: meteo.weather?.[0]?.description ?? 'indisponible',\n    condition_meteo_main: meteo.weather?.[0]?.main ?? 'Unknown',\n    sunset_ts: timestamp(meteo.sys?.sunset),\n\n    previsions_meteo: forecast,\n\n    quality: {\n      indoor_valid: tempValid,\n      humidity_valid: humidityValid,\n\n      sensor_timestamps_available:\n        insideTs !== null && humidityTs !== null,\n\n      tado_rate_limit: tadoResponse.headers?.ratelimit ?? null,\n\n      weather_source: weatherSource,\n      weather_is_forecast_estimate: forecastEstimate,\n\n      weather_forecast_offset_hours: forecastEstimate\n        ? Number(((nearestForecast.ts - now) / HOUR).toFixed(2))\n        : null,\n\n      weather_age_minutes: weatherSource === 'unavailable'\n        ? null\n        : Math.max(\n            0,\n            Math.round(\n              (\n                now -\n                (\n                  forecastEstimate\n                    ? forecastFetchTs\n                    : state.weather.observedAt\n                )\n              ) / 60000\n            )\n          ),\n\n      forecast_source: forecastSource,\n      forecast_fetched_at: forecastFetchTs,\n\n      forecast_age_minutes: forecastFetchTs === null\n        ? null\n        : Math.max(0, Math.round((now - forecastFetchTs) / 60000)),\n\n      forecast_count: forecast.length,\n      forecast_until: forecast.length ? forecast.at(-1).ts : null\n    }\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        208,
-        992
+        620,
+        1040
       ],
       "id": "654d00d9-e094-5905-a951-6db71b14735a",
       "name": "Fusionner données"
     },
     {
       "parameters": {
-        "jsCode": "// Requires the updated \"Fusionner données\" node from the provided workflow.\n// Supervisory room setpoints: Tado keeps control of the radiator valve.\n// No external modules, no network calls, and no OFF command.\n\nconst store = $getWorkflowStaticData('global');\nconst data = $json;\nconst config = $('Configuration Logement').first().json;\nconst now = Date.now();\nconst MINUTE = 60000;\nconst HOUR = 60 * MINUTE;\n\nstore.climate_v2 ??= {};\nconst state = store.climate_v2[data.zone_key] ??= {};\n\nfunction numeric(value) {\n  if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return null;\n  const n = Number(String(value).replace(',', '.'));\n  return Number.isFinite(n) ? n : null;\n}\n\nconst clamp = (n, min, max) => Math.min(max, Math.max(min, n));\nconst setting = (name, fallback, min, max) => clamp(numeric(config[name]) ?? fallback, min, max);\nconst enabled = (name, fallback) => typeof config[name] === 'boolean' ? config[name] : fallback;\nconst rounded = (n, digits = 2) => n === null || !Number.isFinite(n) ? null : Number(n.toFixed(digits));\n\nconst indoor = numeric(data.temp_interieure);\nconst outdoor = numeric(data.temp_exterieure);\nconst humidity = numeric(data.humidite_interieure);\nconst outsideHumidity = numeric(data.humidite_pourcent);\nconst current = numeric(data.consigne_actuelle);\nconst power = data.power_actuel;\n\nconst insideOk = data.tado_api_ok === true && indoor !== null && indoor >= -10 && indoor <= 50;\nconst humidityOk = data.tado_api_ok === true && humidity !== null && humidity > 0 && humidity <= 100;\nconst presence = typeof data.presence === 'boolean' ? data.presence : enabled('DEFAULT_PRESENCE', true);\n\nconst minSetpoint = setting('Min_thérmostat', 6, 6, 25);\nconst maxSetpoint = Math.max(minSetpoint, setting('Max_thérmostat', 25, 6, 25));\n\nconst allowed = [];\n\nfor (let n = 6; n <= 14; n++) {\n  if (n >= minSetpoint && n <= maxSetpoint) allowed.push(n);\n}\n\nfor (let n = 15; n <= 25; n += 0.5) {\n  if (n >= minSetpoint && n <= maxSetpoint) allowed.push(n);\n}\n\nif (!allowed.length) {\n  throw new Error('Aucun palier Tado autorisé entre les limites configurées.');\n}\n\nconst quantize = value => allowed.reduce(\n  (best, n) => Math.abs(n - value) < Math.abs(best - value) - 1e-9 ? n : best,\n  allowed[0]\n);\n\nconst eco = allowed[0];\nconst timezone = String(config.TIMEZONE ?? 'Europe/Paris');\n\nconst clock = new Intl.DateTimeFormat('en-GB', {\n  timeZone: timezone,\n  year: 'numeric',\n  month: 'numeric',\n  day: 'numeric',\n  hour: 'numeric',\n  minute: 'numeric',\n  weekday: 'short',\n  hourCycle: 'h23'\n});\n\nfunction localContext(ts) {\n  const p = Object.fromEntries(\n    clock.formatToParts(new Date(ts)).map(p => [p.type, p.value])\n  );\n\n  const month = Number(p.month);\n  const hour = Number(p.hour) + Number(p.minute) / 60;\n  const weekend = p.weekday === 'Sat' || p.weekday === 'Sun';\n\n  const morning = setting(\n    weekend ? 'WEEKEND_MORNING_HOUR' : 'WORKDAY_MORNING_HOUR',\n    weekend ? 8 : 6,\n    0,\n    12\n  );\n\n  const evening = setting('EVENING_START_HOUR', 17, 12, 22);\n  const night = setting('NIGHT_START_HOUR', 22, evening, 23.5);\n  const lateNight = setting('LATE_NIGHT_START_HOUR', 23, night, 24);\n\n  const phase = hour < morning || hour >= lateNight\n    ? 'late_night'\n    : hour < 9\n      ? 'morning'\n      : hour < evening\n        ? 'day'\n        : hour < night\n          ? 'evening'\n          : 'night';\n\n  const season = [12, 1, 2].includes(month)\n    ? 'winter'\n    : [3, 4, 5].includes(month)\n      ? 'spring'\n      : [6, 7, 8].includes(month)\n        ? 'summer'\n        : 'autumn';\n\n  return { month, hour, weekend, phase, season };\n}\n\nconst context = localContext(now);\n\nconst comfortTable = {\n  winter: {\n    late_night: 18,\n    morning: 21.2,\n    day: 21.5,\n    evening: 21.5,\n    night: 19\n  },\n  spring: {\n    late_night: 17.8,\n    morning: 20.8,\n    day: 21,\n    evening: 21,\n    night: 18.7\n  },\n  summer: {\n    late_night: 17.5,\n    morning: 20,\n    day: 20.5,\n    evening: 20.5,\n    night: 18\n  },\n  autumn: {\n    late_night: 18,\n    morning: 21,\n    day: 21.2,\n    evening: 21.2,\n    night: 18.8\n  }\n};\n\nconst comfortOffset = setting('COMFORT_OFFSET_C', 0, -4, 3);\nconst awayTarget = setting('AWAY_TARGET_C', 17.5, 6, 22);\n\nfunction comfortAt(ctx) {\n  let value = comfortTable[ctx.season][ctx.phase] + comfortOffset;\n\n  if (ctx.weekend && ctx.phase === 'morning' && ctx.season !== 'summer') {\n    value += 0.2;\n  }\n\n  return presence ? clamp(value, 16, 22) : Math.min(value, awayTarget);\n}\n\nconst baseComfort = comfortAt(context);\n\n// Five rolling 24-hour periods. Only the next few hours may initiate an adjustment.\n// More distant days can strengthen that immediate signal, but cannot trigger it alone.\nconst forecastEnabled = enabled('FORECAST_ENABLED', true);\nconst forecastFetchTs = numeric(data.quality?.forecast_fetched_at);\n\nconst forecastFresh = forecastFetchTs !== null &&\n  forecastFetchTs <= now + 5 * MINUTE &&\n  now - forecastFetchTs <= setting('FORECAST_MAX_AGE_MINUTES', 180, 30, 720) * MINUTE;\n\nconst forecastMap = new Map();\n\nif (forecastEnabled && forecastFresh && Array.isArray(data.previsions_meteo)) {\n  for (const point of data.previsions_meteo) {\n    const ts = numeric(point?.ts);\n    const temp = numeric(point?.temp);\n\n    if (\n      ts !== null &&\n      ts >= now &&\n      ts <= now + 120 * HOUR &&\n      temp !== null &&\n      temp >= -60 &&\n      temp <= 60\n    ) {\n      forecastMap.set(ts, { ts, temp });\n    }\n  }\n}\n\nconst forecastPoints = [...forecastMap.values()].sort((a, b) => a.ts - b.ts);\n\nfunction forecastPeriod(startHours, endHours, inclusiveEnd = false) {\n  const start = now + startHours * HOUR;\n  const end = now + endHours * HOUR;\n\n  const points = forecastPoints.filter(point =>\n    point.ts >= start &&\n    (inclusiveEnd || endHours === 120 ? point.ts <= end : point.ts < end)\n  );\n\n  const temperatures = points.map(point => point.temp);\n\n  const continuous =\n    points.length >= Math.max(2, Math.floor((endHours - startHours) / 3) - 1) &&\n    points[0].ts <= start + 3 * HOUR &&\n    points.at(-1).ts >= end - 3 * HOUR &&\n    points.every((point, index) =>\n      index === 0 || point.ts - points[index - 1].ts <= 3.1 * HOUR\n    );\n\n  return {\n    count: points.length,\n    complete: continuous,\n    mean: points.length\n      ? temperatures.reduce((a, b) => a + b, 0) / points.length\n      : null,\n    min: points.length ? Math.min(...temperatures) : null,\n    max: points.length ? Math.max(...temperatures) : null\n  };\n}\n\nconst forecastHorizon = setting('FORECAST_HORIZON_HOURS', 6, 6, 12);\nconst nearForecast = forecastPeriod(0, forecastHorizon, true);\nconst dayForecast = forecastPeriod(0, 24);\n\nconst forecastDays = Array.from({ length: 5 }, (_, index) => ({\n  day: index + 1,\n  from_hours: index * 24,\n  to_hours: (index + 1) * 24,\n  ...forecastPeriod(index * 24, (index + 1) * 24)\n}));\n\nconst dayWeights = [1, 0.65, 0.4, 0.25, 0.15];\nconst usableDays = forecastDays.filter(day => day.complete);\n\nconst totalWeight = usableDays.reduce(\n  (sum, day) => sum + dayWeights[day.day - 1],\n  0\n);\n\nconst forecastMean5d = totalWeight > 0\n  ? usableDays.reduce(\n      (sum, day) => sum + day.mean * dayWeights[day.day - 1],\n      0\n    ) / totalWeight\n  : null;\n\nconst forecastReady =\n  forecastEnabled &&\n  forecastFresh &&\n  nearForecast.complete &&\n  outdoor !== null;\n\nconst nearDelta = forecastReady ? nearForecast.mean - outdoor : null;\n\nconst warmingSoon =\n  forecastReady &&\n  nearForecast.min >= setting('FORECAST_MILD_MIN_C', 16, 10, 22) &&\n  (nearDelta >= 2 || nearForecast.mean >= baseComfort - 1);\n\nconst coolingSoon =\n  forecastReady &&\n  nearDelta <= -3 &&\n  nearForecast.min <= 8;\n\nlet forecastReduction = 0;\nlet forecastBoost = 0;\n\nlet forecastReason = !forecastEnabled\n  ? 'desactivees'\n  : !forecastReady\n    ? 'previsions_insuffisantes'\n    : 'maintien';\n\n// Estimate the measured trend from distinct sensor samples, not from execution count.\nconst historyWindow = setting('TREND_WINDOW_MINUTES', 120, 30, 240) * MINUTE;\n\nstate.history = (Array.isArray(state.history) ? state.history : []).filter(p =>\n  Number.isFinite(p.ts) &&\n  Number.isFinite(p.temp) &&\n  p.ts <= now + MINUTE &&\n  p.ts >= now - historyWindow\n);\n\nconst sampleTs = numeric(data.temperature_sample_ts);\n\nif (\n  insideOk &&\n  sampleTs !== null &&\n  !state.history.some(p => p.ts === sampleTs)\n) {\n  state.history.push({\n    ts: sampleTs,\n    temp: indoor,\n    window: data.window_open_detected === true\n  });\n}\n\nstate.history.sort((a, b) => a.ts - b.ts);\nstate.history = state.history.slice(-64);\n\nconst trendPoints = state.history.filter(p =>\n  !p.window && p.ts > (state.window?.lastClearedAt ?? 0)\n);\n\nlet trend = null;\n\nif (\n  trendPoints.length >= 3 &&\n  trendPoints.at(-1).ts - trendPoints[0].ts >= 30 * MINUTE\n) {\n  const meanX = trendPoints.reduce(\n    (sum, p) => sum + (p.ts - now) / HOUR,\n    0\n  ) / trendPoints.length;\n\n  const meanY = trendPoints.reduce(\n    (sum, p) => sum + p.temp,\n    0\n  ) / trendPoints.length;\n\n  let covariance = 0;\n  let variance = 0;\n\n  for (const p of trendPoints) {\n    const dx = (p.ts - now) / HOUR - meanX;\n    covariance += dx * (p.temp - meanY);\n    variance += dx * dx;\n  }\n\n  if (variance > 0) {\n    trend = clamp(covariance / variance, -2, 2);\n  }\n}\n\n// Low-order astronomical estimate.\n// Vertical-window incidence is an estimate, not measured solar heat.\nfunction solarPosition() {\n  const lat = numeric(config.Lat);\n  const lon = numeric(config.Lon);\n\n  if (\n    lat === null ||\n    lon === null ||\n    Math.abs(lat) > 90 ||\n    Math.abs(lon) > 180\n  ) {\n    return null;\n  }\n\n  const rad = Math.PI / 180;\n  const days = now / 86400000 - 10957.5;\n  const g = (357.528 + 0.9856003 * days) * rad;\n\n  const lambda = (\n    280.460 +\n    0.9856474 * days +\n    1.915 * Math.sin(g) +\n    0.020 * Math.sin(2 * g)\n  ) * rad;\n\n  const epsilon = (23.439 - 0.0000004 * days) * rad;\n\n  const alpha = Math.atan2(\n    Math.cos(epsilon) * Math.sin(lambda),\n    Math.cos(lambda)\n  );\n\n  const delta = Math.asin(Math.sin(epsilon) * Math.sin(lambda));\n\n  const h = (\n    (18.697374558 + 24.06570982441908 * days) * 15 + lon\n  ) * rad - alpha;\n\n  const phi = lat * rad;\n\n  const elevation = Math.asin(\n    Math.sin(phi) * Math.sin(delta) +\n    Math.cos(phi) * Math.cos(delta) * Math.cos(h)\n  );\n\n  const azimuth = (\n    Math.atan2(\n      Math.sin(h),\n      Math.cos(h) * Math.sin(phi) - Math.tan(delta) * Math.cos(phi)\n    ) / rad + 540\n  ) % 360;\n\n  return { elevation: elevation / rad, azimuth };\n}\n\nconst solar = solarPosition();\nconst clouds = numeric(data.nuages_pourcent);\nconst wind = numeric(data.vitesse_vent_ms);\n\nlet solarScore = 0;\n\nif (solar && clouds !== null && solar.elevation > 5) {\n  const difference = Math.abs(\n    ((solar.azimuth - setting('AZIMUTH', 285, 0, 360) + 540) % 360) - 180\n  );\n\n  if (difference <= setting('AZIMUTH_TOLERANCE', 45, 0, 90)) {\n    solarScore =\n      Math.cos(solar.elevation * Math.PI / 180) *\n      Math.cos(difference * Math.PI / 180) *\n      (1 - clamp(clouds / 100, 0, 1));\n  }\n}\n\nlet weatherCorrection = 0;\n\nif (\n  outdoor !== null &&\n  presence &&\n  !['night', 'late_night'].includes(context.phase)\n) {\n  weatherCorrection = outdoor < 8\n    ? clamp((8 - outdoor) / 20, 0, 0.5)\n    : -clamp((outdoor - 16) / 12, 0, 0.5);\n\n  if (outdoor < 8 && wind !== null) {\n    weatherCorrection += clamp((wind - 4) / 40, 0, 0.15);\n  }\n\n  weatherCorrection = clamp(weatherCorrection, -0.5, 0.5);\n}\n\nlet comfort = clamp(\n  baseComfort + weatherCorrection,\n  eco,\n  Math.min(22, maxSetpoint)\n);\n\n// Anticipation is confined to a forthcoming higher schedule target.\nconst future = localContext(\n  now + setting('PREHEAT_MINUTES', 45, 0, 90) * MINUTE\n);\n\nlet preheating = false;\n\nif (\n  insideOk &&\n  presence &&\n  future.phase !== context.phase &&\n  comfortAt(future) > baseComfort &&\n  indoor < comfortAt(future) - 0.5 &&\n  (outdoor === null || outdoor < 16)\n) {\n  comfort = clamp(comfortAt(future), eco, Math.min(22, maxSetpoint));\n  preheating = true;\n}\n\n// A measured comfort deficit or cooling room always cancels forecast savings.\nconst dayPhase = !['night', 'late_night'].includes(context.phase);\nconst gentleCoolingLimit = -0.15;\n\nconst canReduceFromForecast =\n  insideOk &&\n  !preheating &&\n  indoor >= comfort - 0.3 &&\n  (trend === null || trend >= gentleCoolingLimit);\n\nif (warmingSoon && canReduceFromForecast) {\n  const sustainedMild = forecastMean5d !== null && forecastMean5d >= 16;\n\n  const strength = clamp(\n    Math.max(nearDelta / 6, (nearForecast.mean - 16) / 6),\n    0.25,\n    1\n  );\n\n  forecastReduction =\n    setting('FORECAST_MAX_REDUCTION_C', 0.5, 0, 1) *\n    strength *\n    (sustainedMild ? 1 : 0.75);\n\n  forecastReason = 'redoux_proche_piece_assez_chaude';\n} else if (\n  coolingSoon &&\n  insideOk &&\n  presence &&\n  dayPhase &&\n  !preheating &&\n  (\n    indoor < comfort - 0.3 ||\n    (trend !== null && trend < -0.1 && indoor <= comfort + 0.2)\n  )\n) {\n  const sustainedCold = forecastMean5d !== null && forecastMean5d < 8;\n\n  forecastBoost =\n    setting('FORECAST_MAX_BOOST_C', 0.5, 0, 0.5) *\n    clamp(-nearDelta / 6, 0, 1) *\n    (sustainedCold ? 1 : 0.75);\n\n  // Keep the combined present-weather and forecast cold correction at or below +0.5 C.\n  forecastBoost = Math.min(\n    forecastBoost,\n    Math.max(0, 0.5 - Math.max(0, weatherCorrection))\n  );\n\n  const originalComfort = comfort;\n\n  comfort = clamp(\n    comfort + forecastBoost,\n    eco,\n    Math.min(22, maxSetpoint)\n  );\n\n  forecastBoost = comfort - originalComfort;\n  forecastReason = 'refroidissement_proche_besoin_mesure';\n} else if (warmingSoon && !canReduceFromForecast) {\n  forecastReason = 'redoux_annonce_mais_confort_prioritaire';\n}\n\n// ECO needs mild weather over 24 h, a warm room and a measured stable/rising trend.\n// Hysteresis uses the previous successful command, not a merely computed decision.\nconst wasForecastEco =\n  state.lastApplied?.mode === 'FORECAST_MILD_ECO' &&\n  current === eco &&\n  power === 'ON';\n\nconst forecastEco =\n  forecastReady &&\n  dayForecast.complete &&\n  nearForecast.mean >= baseComfort - 1 &&\n  dayForecast.min >= setting('FORECAST_ECO_MIN_C', 18, 16, 22) &&\n  insideOk &&\n  !preheating &&\n  trend !== null &&\n  trend >= (wasForecastEco ? -0.1 : 0) &&\n  indoor >= comfort + (wasForecastEco ? 0.1 : 0.5);\n\nconst inertia = setting('THERMAL_INERTIA', 0.9, 0, 1);\nconst reductionLimit = setting('MAX_SOLAR_REDUCTION_C', 0.5, 0, 1);\n\nconst solarReduction =\n  insideOk &&\n  indoor >= comfort - 0.3 &&\n  trend !== null &&\n  trend > 0.1\n    ? solarScore * reductionLimit * inertia\n    : 0;\n\nconst trendReduction =\n  insideOk &&\n  indoor >= comfort - 0.2 &&\n  trend !== null\n    ? clamp(trend * (20 / 60) * inertia, 0, reductionLimit)\n    : 0;\n\n// Do not count the same measured warming twice as both trend and solar heat.\nlet requested = comfort - Math.max(\n  solarReduction,\n  trendReduction,\n  forecastReduction\n);\n\nlet targetMode = preheating ? 'PREHEAT' : presence ? 'COMFORT' : 'AWAY';\nlet reason = preheating ? 'anticipation_horaire' : 'consigne_confort_stable';\n\nif (forecastReduction > 0) {\n  targetMode = 'FORECAST_REDUCED';\n  reason = forecastReason;\n} else if (forecastBoost > 0) {\n  targetMode = 'FORECAST_COLD';\n  reason = forecastReason;\n}\n\n// Window episodes use only the native Tado signal.\n// Its disappearance is not proof of physical closure.\nstate.window ??= { active: false };\n\nconst window = state.window;\nconst wasWindowActive = window.active === true;\nconst nativeWindow = data.window_open_detected;\n\nif (data.tado_api_ok && nativeWindow === true) {\n  if (!window.active) {\n    window.openedAt = now;\n    window.episodeId = `${now}`;\n  }\n\n  window.active = true;\n  window.lastPositiveAt = now;\n  window.lastKnownAt = now;\n} else if (data.tado_api_ok && nativeWindow === false) {\n  window.lastKnownAt = now;\n\n  if (\n    window.active &&\n    now - window.openedAt >= setting('WINDOW_HOLD_MINUTES', 15, 0, 60) * MINUTE\n  ) {\n    window.active = false;\n    window.lastClearedAt = now;\n  }\n} else if (\n  window.active &&\n  now - (window.lastPositiveAt ?? 0) >\n    setting('WINDOW_UNKNOWN_HOLD_MINUTES', 60, 15, 180) * MINUTE\n) {\n  window.active = false;\n  window.lastClearedAt = now;\n}\n\nconst windowActive = window.active === true;\nconst windowJustCleared = wasWindowActive && !windowActive;\nconst overheatLimit = setting('OVERHEAT_LIMIT', 22.6, 19, 30);\n\nif (insideOk) {\n  state.overheat = state.overheat\n    ? indoor > overheatLimit - 0.6\n    : indoor >= overheatLimit;\n\n  const warmThreshold = context.season === 'summer'\n    ? 20\n    : setting('HARD_SUMMER_EXT_LIMIT', 25, 18, 35);\n\n  // A forecast estimate must meet the stricter 24-hour ECO rules above.\n  // An imminent cold front also vetoes the legacy current-weather standby.\n  state.warmStandby =\n    data.quality?.weather_is_forecast_estimate !== true &&\n    !coolingSoon &&\n    outdoor !== null &&\n    (\n      state.warmStandby\n        ? outdoor >= warmThreshold - 2 && indoor >= comfort - 0.5\n        : outdoor >= warmThreshold && indoor >= comfort + 0.3\n    );\n}\n\nif (windowActive) {\n  requested = eco;\n  targetMode = 'WINDOW_OPEN_ECO';\n\n  reason = nativeWindow === true\n    ? 'ouverture_signalee_par_tado'\n    : 'temporisation_apres_signal_fenetre';\n} else if (insideOk && state.overheat) {\n  requested = eco;\n  targetMode = 'OVERHEAT_ECO';\n  reason = 'surchauffe_mesuree';\n} else if (insideOk && state.warmStandby) {\n  requested = eco;\n  targetMode = 'WARM_WEATHER_ECO';\n  reason = 'temps_doux_et_piece_deja_chaude';\n} else if (forecastEco) {\n  requested = eco;\n  targetMode = 'FORECAST_MILD_ECO';\n  reason = 'douceur_24h_et_piece_chaude_stable';\n} else if (\n  Math.max(solarReduction, trendReduction) > Math.max(0.1, forecastReduction)\n) {\n  reason = 'reduction_limitee_montee_mesuree';\n}\n\nconst legacyScriptOff = store.script_turned_it_off === true && !state.lastApplied;\n\nconst externalOff =\n  power === 'OFF' &&\n  enabled('RESPECT_MANUAL_OFF', true) &&\n  !windowActive &&\n  !windowJustCleared &&\n  !legacyScriptOff &&\n  state.lastApplied?.mode !== 'WINDOW_OPEN_ECO';\n\nlet target = quantize(requested);\n\n// A small deadband around each rounding boundary prevents alternating half-degree requests.\nif (\n  !targetMode.endsWith('_ECO') &&\n  allowed.includes(current) &&\n  power === 'ON' &&\n  target !== current\n) {\n  const boundary =\n    Math.abs(target - current) / 2 +\n    setting('SETPOINT_DEADBAND_C', 0.1, 0, 0.25);\n\n  if (Math.abs(requested - current) < boundary) {\n    target = current;\n  }\n}\n\nconst lastUpdate = numeric(state.lastApplied?.ts) ?? 0;\n\nconst urgent =\n  (\n    windowActive &&\n    (\n      state.lastApplied?.mode !== 'WINDOW_OPEN_ECO' ||\n      current !== eco ||\n      power !== 'ON'\n    )\n  ) ||\n  windowJustCleared ||\n  (insideOk && state.overheat && current !== eco) ||\n  (insideOk && indoor < 12 && !windowActive);\n\nconst delayOk =\n  now - lastUpdate >= setting('MIN_DELAY_MINUTES', 25, 0, 180) * MINUTE ||\n  urgent;\n\nconst targetChangedEnough =\n  current === null ||\n  Math.abs(target - current) >= setting('MIN_DELTA_SETPOINT', 0.5, 0.5, 2) ||\n  power === 'OFF';\n\nlet action = targetChangedEnough && delayOk ? 'UPDATE' : 'IGNORE';\n\nif (!insideOk || !['ON', 'OFF'].includes(power)) {\n  action = 'IGNORE';\n  reason = 'mesure_interieure_ou_etat_tado_indisponible';\n  targetMode = 'DATA_UNAVAILABLE';\n} else if (externalOff) {\n  action = 'IGNORE';\n  reason = 'etat_off_externe_respecte';\n  targetMode = 'EXTERNAL_OFF_RESPECTED';\n}\n\n// Tetens vapor pressure (hPa).\n// The same equation is used for RH, dew point and ventilation advice.\nconst saturation = temperature =>\n  6.11 * 10 ** (7.5 * temperature / (237.3 + temperature));\n\nconst pressureInside = insideOk && humidityOk\n  ? saturation(indoor) * humidity / 100\n  : null;\n\nconst pressureOutside = outdoor !== null && outsideHumidity !== null\n  ? saturation(outdoor) * outsideHumidity / 100\n  : null;\n\nfunction dewPoint(pressure) {\n  if (pressure === null || pressure <= 0) return null;\n\n  const a = Math.log10(pressure / 6.11);\n  return 237.3 * a / (7.5 - a);\n}\n\nconst dewInside = dewPoint(pressureInside);\nconst dewOutside = dewPoint(pressureOutside);\n\nconst equivalentOutsideRh = insideOk && pressureOutside !== null\n  ? 100 * pressureOutside / saturation(indoor)\n  : null;\n\nconst dryingBenefit = humidityOk && equivalentOutsideRh !== null\n  ? humidity - equivalentOutsideRh\n  : null;\n\nconst effectiveVentilation =\n  dryingBenefit !== null &&\n  dryingBenefit >= setting('VENTILATION_MIN_RH_GAIN', 5, 2, 20);\n\n// This surface estimate is diagnostic only; it never raises the heating target.\nconst measuredSurface = numeric(data.temp_surface_interieure);\n\nconst surfaceTemperature = measuredSurface ?? (\n  insideOk && outdoor !== null && outdoor < indoor\n    ? outdoor + setting('SURFACE_FACTOR', 0.75, 0.3, 1) * (indoor - outdoor)\n    : null\n);\n\nconst condensationMargin =\n  dewInside !== null && surfaceTemperature !== null\n    ? surfaceTemperature - dewInside\n    : null;\n\nconst condensationRisk =\n  humidityOk &&\n  condensationMargin !== null &&\n  condensationMargin <= setting('CONDENSATION_MARGIN_C', 2, 0, 5);\n\nconst low = setting('HUMIDITY_LOW_PERCENT', 30, 15, 45);\nconst high = setting('HUMIDITY_HIGH_PERCENT', 60, 50, 80);\n\nconst criticalLow = Math.min(\n  low - 2,\n  setting('HUMIDITY_CRITICAL_LOW_PERCENT', 25, 5, 40)\n);\n\nconst criticalHigh = Math.max(\n  high + 2,\n  setting('HUMIDITY_CRITICAL_HIGH_PERCENT', 70, 55, 95)\n);\n\nconst hysteresis = setting('HUMIDITY_HYSTERESIS_PERCENT', 3, 1, 5);\n\nstate.humidity ??= {};\nconst hum = state.humidity;\n\nlet humidityStatus = 'unknown';\nlet humiditySeverity = 'none';\n\nif (humidityOk) {\n  humidityStatus = 'normal';\n\n  if (\n    humidity <= low ||\n    (hum.status === 'too_dry' && humidity < low + hysteresis)\n  ) {\n    humidityStatus = 'too_dry';\n  } else if (\n    humidity >= high ||\n    condensationRisk ||\n    (hum.status === 'too_humid' && humidity > high - hysteresis)\n  ) {\n    humidityStatus = 'too_humid';\n  }\n\n  if (humidityStatus !== 'normal') {\n    humiditySeverity = (\n      humidityStatus === 'too_dry'\n        ? humidity <= criticalLow ||\n          (\n            hum.status === 'too_dry' &&\n            hum.severity === 'critical' &&\n            humidity < criticalLow + 2\n          )\n        : humidity >= criticalHigh ||\n          (\n            hum.status === 'too_humid' &&\n            hum.severity === 'critical' &&\n            humidity > criticalHigh - 2\n          )\n    ) ? 'critical' : 'warning';\n  }\n}\n\nconst humiditySample = numeric(data.humidity_sample_ts);\nconst candidateKey = `${humidityStatus}:${humiditySeverity}`;\n\nconst gapTooLong =\n  humiditySample !== null &&\n  hum.lastSampleTs !== undefined &&\n  humiditySample - hum.lastSampleTs >\n    setting('SENSOR_MAX_AGE_MINUTES', 90, 5, 1440) * MINUTE;\n\nif (!humidityOk) {\n  hum.candidate = null;\n  hum.count = 0;\n} else if (humiditySample !== null && humiditySample !== hum.lastSampleTs) {\n  if (hum.candidate !== candidateKey || gapTooLong) {\n    hum.candidate = candidateKey;\n    hum.since = humiditySample;\n    hum.count = 1;\n  } else {\n    hum.count = (hum.count ?? 0) + 1;\n  }\n\n  hum.lastSampleTs = humiditySample;\n  hum.status = humidityStatus;\n  hum.severity = humiditySeverity;\n}\n\nconst confirmMinutes = humiditySeverity === 'critical'\n  ? setting('HUMIDITY_CRITICAL_CONFIRM_MINUTES', 5, 0, 60)\n  : setting('HUMIDITY_CONFIRM_MINUTES', 30, 0, 180);\n\nconst confirmed =\n  humidityOk &&\n  hum.candidate === candidateKey &&\n  hum.count >= 2 &&\n  humiditySample - hum.since >= confirmMinutes * MINUTE;\n\nconst extreme = humidityOk && (humidity <= 15 || humidity >= 85);\nconst abnormal = !['normal', 'unknown'].includes(humidityStatus);\n\nif (confirmed && !abnormal) {\n  hum.activeEpisode = null;\n}\n\nif (\n  abnormal &&\n  (confirmed || extreme) &&\n  (!hum.activeEpisode || hum.activeEpisode.family !== humidityStatus)\n) {\n  hum.activeEpisode = {\n    id: `${hum.since}:${humidityStatus}`,\n    family: humidityStatus\n  };\n}\n\nconst lastHumAlert = hum.lastSent ?? {};\n\nconst elapsedHumAlert = lastHumAlert.ts === undefined\n  ? Infinity\n  : now - lastHumAlert.ts;\n\nconst escalated =\n  lastHumAlert.family === humidityStatus &&\n  lastHumAlert.severity === 'warning' &&\n  humiditySeverity === 'critical';\n\nconst newEpisode = lastHumAlert.episodeId !== hum.activeEpisode?.id;\n\nconst cooldownHours = escalated\n  ? 0.5\n  : newEpisode\n    ? 2\n    : humiditySeverity === 'critical'\n      ? setting('HUMIDITY_CRITICAL_REMINDER_HOURS', 6, 1, 48)\n      : setting('HUMIDITY_REMINDER_HOURS', 12, 1, 72);\n\nconst sendHumAlert =\n  abnormal &&\n  (confirmed || extreme) &&\n  elapsedHumAlert >= cooldownHours * HOUR;\n\nconst idealRange = context.season === 'winter'\n  ? '35–50 %'\n  : context.season === 'summer'\n    ? '40–60 %'\n    : '40–55 %';\n\nfunction humidityAdvice() {\n  if (humidityStatus === 'too_dry') {\n    const outdoorAdvice = dryingBenefit !== null && dryingBenefit > 5\n      ? \"L’air extérieur assécherait encore la pièce une fois réchauffé. \"\n      : '';\n\n    return `${outdoorAdvice}Garde l’aération quotidienne et la ventilation habituelle, évite de surchauffer et surveille le taux avant d’humidifier davantage.`;\n  }\n\n  const storm = String(data.condition_meteo_main).toLowerCase() === 'thunderstorm';\n\n  if (storm || (wind !== null && wind >= 12)) {\n    return \"Orage ou vent fort : privilégie la VMC ou l’extraction ; aère brièvement quand les conditions le permettent.\";\n  }\n\n  if (nativeWindow === true && effectiveVentilation) {\n    return \"Tado signale déjà une ouverture. L’air extérieur peut assécher la pièce ; surveille la baisse d’humidité et évite de prolonger inutilement l’aération.\";\n  }\n\n  if (effectiveVentilation) {\n    const duration = outdoor <= 8 || (wind !== null && wind >= 5)\n      ? '5 à 10'\n      : 'environ 10';\n\n    const rain = ['rain', 'drizzle', 'snow'].includes(\n      String(data.condition_meteo_main).toLowerCase()\n    )\n      ? \" Choisis une ouverture abritée des précipitations.\"\n      : '';\n\n    return `Aérer ${duration} minutes peut assécher la pièce : l’air extérieur ramené à ${rounded(indoor, 1)} °C serait à environ ${rounded(equivalentOutsideRh, 0)} % HR.${rain} Garde la ventilation habituelle.`;\n  }\n\n  if (dryingBenefit === null) {\n    return \"Données extérieures insuffisantes pour conseiller une aération déshumidifiante. Garde la ventilation habituelle et vérifie les sources d’humidité.\";\n  }\n\n  return \"L’air extérieur n’est pas assez sec pour déshumidifier efficacement par une longue aération. Garde la ventilation habituelle, utilise l’extraction et vérifie les sources d’humidité ; un déshumidificateur peut aider si cela persiste.\";\n}\n\nconst alertMessage = abnormal ? [\n  humidityStatus === 'too_dry'\n    ? `🌵 Air ${humiditySeverity === 'critical' ? 'très ' : ''}sec : ${rounded(humidity, 1)} % HR.`\n    : `💧 ${condensationRisk && humidity < high ? 'Risque de condensation sur paroi froide' : humiditySeverity === 'critical' ? 'Air très humide' : 'Air humide'} : ${rounded(humidity, 1)} % HR.`,\n\n  insideOk\n    ? `Intérieur : ${rounded(indoor, 1)} °C. Repère de confort saisonnier : ${idealRange}.`\n    : `Repère de confort saisonnier : ${idealRange}.`,\n\n  condensationRisk\n    ? `Point de rosée : ${rounded(dewInside, 1)} °C ; paroi ${measuredSurface === null ? 'estimée' : 'mesurée'} à ${rounded(surfaceTemperature, 1)} °C. ${measuredSurface === null ? 'Estimation à vérifier sur place.' : ''}`\n    : '',\n\n  humidityAdvice(),\n\n  data.quality?.weather_is_forecast_estimate === true\n    ? 'Météo extérieure estimée à partir des prévisions, à confirmer sur place.'\n    : ''\n].filter(Boolean).join('\\n') : null;\n\n// Only successful Telegram acknowledgements update lastSent.\n// Failed messages remain retryable.\nconst windowReminder = setting('WINDOW_REMINDER_MINUTES', 60, 15, 360) * MINUTE;\n\nconst sendWindowAlert =\n  data.tado_api_ok === true &&\n  nativeWindow === true &&\n  (\n    window.lastSent?.episodeId !== window.episodeId ||\n    now - window.lastSent.ts >= windowReminder\n  );\n\nconst windowMessage = sendWindowAlert ? [\n  window.lastSent?.episodeId === window.episodeId\n    ? '🪟 Tado signale toujours une fenêtre ouverte.'\n    : '🪟 Tado vient de signaler une fenêtre ouverte.',\n\n  insideOk\n    ? `Intérieur : ${rounded(indoor, 1)} °C${humidityOk ? ` · Humidité : ${rounded(humidity, 1)} %` : ''}.`\n    : 'Température intérieure indisponible.',\n\n  action === 'UPDATE'\n    ? `Consigne demandée : ${target} °C, mode ON.`\n    : insideOk && current === eco && power === 'ON'\n      ? `Consigne actuelle : ${eco} °C, mode ON.`\n      : 'Vérifie le chauffage dans Tado : aucune nouvelle consigne n’a été envoyée par cette décision.',\n\n  'Vérifie la fenêtre. Tado déduit l’ouverture des variations de température/humidité ; ce signal ne remplace pas un capteur de contact.'\n].join('\\n') : null;\n\nreturn [{\n  json: {\n    ...data,\n\n    cible: target,\n    target_mode: targetMode,\n    action,\n    reason,\n    delayOk,\n    targetChangedEnough,\n\n    sendHumAlert,\n    alertMessage,\n    sendWindowAlert,\n    windowMessage,\n\n    humidity_alert_meta: sendHumAlert\n      ? {\n          ts: now,\n          family: humidityStatus,\n          severity: humiditySeverity,\n          episodeId: hum.activeEpisode.id\n        }\n      : null,\n\n    window_alert_meta: sendWindowAlert\n      ? {\n          ts: now,\n          episodeId: window.episodeId\n        }\n      : null,\n\n    debug_thermique: {\n      timezone,\n      ...context,\n      presence,\n      presence_source: typeof data.presence === 'boolean'\n        ? 'tado'\n        : 'configuration',\n\n      confort_base: rounded(baseComfort),\n      correction_meteo: rounded(weatherCorrection),\n      confort_cible: rounded(comfort),\n      consigne_avant_arrondi: rounded(requested),\n\n      tendance_deg_par_heure: rounded(trend),\n      echantillons_tendance: trendPoints.length,\n\n      anticipation_horaire: preheating,\n      fenetre_active: windowActive,\n      surchauffe: !!state.overheat,\n      temps_doux: !!state.warmStandby\n    },\n\n    debug_previsions: {\n      activees: forecastEnabled,\n      fraiches: forecastFresh,\n      utilisables: forecastReady,\n      source: data.quality?.forecast_source ?? 'unavailable',\n      temperature_exterieure_estimee:\n        data.quality?.weather_is_forecast_estimate === true,\n\n      horizon_heures: forecastHorizon,\n      nombre_creneaux: forecastPoints.length,\n\n      moyenne_prochaines_heures_c: rounded(nearForecast.mean),\n      minimum_prochaines_heures_c: rounded(nearForecast.min),\n      ecart_prochaines_heures_c: rounded(nearDelta),\n      minimum_24h_c: rounded(dayForecast.min),\n      moyenne_ponderee_5j_c: rounded(forecastMean5d),\n\n      resume_5_jours: forecastDays.map(day => ({\n        jour: day.day,\n        de_heures: day.from_hours,\n        a_heures: day.to_hours,\n        creneaux: day.count,\n        couverture_suffisante: day.complete,\n        moyenne_c: rounded(day.mean),\n        minimum_c: rounded(day.min),\n        maximum_c: rounded(day.max)\n      })),\n\n      redoux_proche: warmingSoon,\n      refroidissement_proche: coolingSoon,\n      reduction_c: rounded(forecastReduction),\n      hausse_c: rounded(forecastBoost),\n      eco_possible: forecastEco,\n      motif: forecastReason,\n      retenues_pour_decision: targetMode.startsWith('FORECAST_')\n    },\n\n    debug_solaire: {\n      elevation: rounded(solar?.elevation),\n      azimut: rounded(solar?.azimuth),\n      nuages: clouds,\n      gain_estime: rounded(solarScore),\n      reduction_solaire_c: rounded(solarReduction),\n      reduction_tendance_c: rounded(trendReduction)\n    },\n\n    debug_humidite: {\n      statut: humidityStatus,\n      severite: humiditySeverity,\n      plage_ideale: idealRange,\n\n      seuil_bas: low,\n      seuil_haut: high,\n      seuil_critique_bas: criticalLow,\n      seuil_critique_haut: criticalHigh,\n\n      point_rosee_interieur_c: rounded(dewInside),\n      point_rosee_exterieur_c: rounded(dewOutside),\n\n      humidite_absolue_interieure_g_m3: pressureInside === null\n        ? null\n        : rounded(216.7 * pressureInside / (indoor + 273.15)),\n\n      humidite_absolue_exterieure_g_m3: pressureOutside === null\n        ? null\n        : rounded(216.7 * pressureOutside / (outdoor + 273.15)),\n\n      humidite_exterieure_ramenee_interieur_percent:\n        rounded(equivalentOutsideRh),\n\n      gain_aeration_points_hr: rounded(dryingBenefit),\n      aeration_deshumidifiante: effectiveVentilation,\n\n      temperature_paroi_c: rounded(surfaceTemperature),\n      paroi_estimee: measuredSurface === null,\n      marge_condensation_c: rounded(condensationMargin),\n      risque_condensation: condensationRisk,\n\n      nombre_mesures_consecutives: hum.count ?? 0,\n      confirme: confirmed,\n      meteo: data.condition_meteo\n    }\n  }\n}];"
+        "jsCode": "// Requires the updated \"Fusionner données\" node from the provided workflow.\n// Supervisory room setpoints: Tado keeps control of the radiator valve.\n// No external modules, no network calls, and no OFF command.\n\nconst store = $getWorkflowStaticData('global');\nconst data = $json;\nconst config = $('Configuration Logement').first().json;\nconst now = Date.now();\nconst MINUTE = 60000;\nconst HOUR = 60 * MINUTE;\n\nstore.climate_v2 ??= {};\nconst state = store.climate_v2[data.zone_key] ??= {};\n\nfunction numeric(value) {\n  if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return null;\n  const n = Number(String(value).replace(',', '.'));\n  return Number.isFinite(n) ? n : null;\n}\n\nconst clamp = (n, min, max) => Math.min(max, Math.max(min, n));\nconst setting = (name, fallback, min, max) => clamp(numeric(config[name]) ?? fallback, min, max);\nconst enabled = (name, fallback) => typeof config[name] === 'boolean' ? config[name] : fallback;\nconst rounded = (n, digits = 2) => n === null || !Number.isFinite(n) ? null : Number(n.toFixed(digits));\n\nconst indoor = numeric(data.temp_interieure);\nconst outdoor = numeric(data.temp_exterieure);\nconst humidity = numeric(data.humidite_interieure);\nconst outsideHumidity = numeric(data.humidite_pourcent);\nconst current = numeric(data.consigne_actuelle);\nconst power = data.power_actuel;\n\nconst insideOk = data.tado_api_ok === true && indoor !== null && indoor >= -10 && indoor <= 50;\nconst humidityOk = data.tado_api_ok === true && humidity !== null && humidity > 0 && humidity <= 100;\nconst presence = typeof data.presence === 'boolean' ? data.presence : enabled('DEFAULT_PRESENCE', true);\n\nconst minSetpoint = setting('Min_thérmostat', 6, 6, 25);\nconst maxSetpoint = Math.max(minSetpoint, setting('Max_thérmostat', 25, 6, 25));\n\nconst allowed = [];\n\nfor (let n = 6; n <= 14; n++) {\n  if (n >= minSetpoint && n <= maxSetpoint) allowed.push(n);\n}\n\nfor (let n = 15; n <= 25; n += 0.5) {\n  if (n >= minSetpoint && n <= maxSetpoint) allowed.push(n);\n}\n\nif (!allowed.length) {\n  throw new Error('Aucun palier Tado autorisé entre les limites configurées.');\n}\n\nconst quantize = value => allowed.reduce(\n  (best, n) => Math.abs(n - value) < Math.abs(best - value) - 1e-9 ? n : best,\n  allowed[0]\n);\n\nconst eco = allowed[0];\nconst timezone = String(config.TIMEZONE ?? 'Europe/Paris');\n\nconst clock = new Intl.DateTimeFormat('en-GB', {\n  timeZone: timezone,\n  year: 'numeric',\n  month: 'numeric',\n  day: 'numeric',\n  hour: 'numeric',\n  minute: 'numeric',\n  weekday: 'short',\n  hourCycle: 'h23'\n});\n\nfunction localContext(ts) {\n  const p = Object.fromEntries(\n    clock.formatToParts(new Date(ts)).map(p => [p.type, p.value])\n  );\n\n  const month = Number(p.month);\n  const hour = Number(p.hour) + Number(p.minute) / 60;\n  const weekend = p.weekday === 'Sat' || p.weekday === 'Sun';\n\n  const morning = setting(\n    weekend ? 'WEEKEND_MORNING_HOUR' : 'WORKDAY_MORNING_HOUR',\n    weekend ? 8 : 6,\n    0,\n    12\n  );\n\n  const evening = setting('EVENING_START_HOUR', 17, 12, 22);\n  const night = setting('NIGHT_START_HOUR', 22, evening, 23.5);\n  const lateNight = setting('LATE_NIGHT_START_HOUR', 23, night, 24);\n\n  const phase = hour < morning || hour >= lateNight\n    ? 'late_night'\n    : hour < 9\n      ? 'morning'\n      : hour < evening\n        ? 'day'\n        : hour < night\n          ? 'evening'\n          : 'night';\n\n  const season = [12, 1, 2].includes(month)\n    ? 'winter'\n    : [3, 4, 5].includes(month)\n      ? 'spring'\n      : [6, 7, 8].includes(month)\n        ? 'summer'\n        : 'autumn';\n\n  return { month, hour, weekend, phase, season };\n}\n\nconst context = localContext(now);\n\nconst comfortTable = {\n  winter: {\n    late_night: 18,\n    morning: 21.2,\n    day: 21.5,\n    evening: 21.5,\n    night: 19\n  },\n  spring: {\n    late_night: 17.8,\n    morning: 20.8,\n    day: 21,\n    evening: 21,\n    night: 18.7\n  },\n  summer: {\n    late_night: 17.5,\n    morning: 20,\n    day: 20.5,\n    evening: 20.5,\n    night: 18\n  },\n  autumn: {\n    late_night: 18,\n    morning: 21,\n    day: 21.2,\n    evening: 21.2,\n    night: 18.8\n  }\n};\n\nconst comfortOffset = setting('COMFORT_OFFSET_C', 0, -4, 3);\nconst awayTarget = setting('AWAY_TARGET_C', 17.5, 6, 22);\n\nfunction comfortAt(ctx) {\n  let value = comfortTable[ctx.season][ctx.phase] + comfortOffset;\n\n  if (ctx.weekend && ctx.phase === 'morning' && ctx.season !== 'summer') {\n    value += 0.2;\n  }\n\n  return presence ? clamp(value, 16, 22) : Math.min(value, awayTarget);\n}\n\nconst baseComfort = comfortAt(context);\n\n// Five rolling 24-hour periods. Only the next few hours may initiate an adjustment.\n// More distant days can strengthen that immediate signal, but cannot trigger it alone.\nconst forecastEnabled = enabled('FORECAST_ENABLED', true);\nconst forecastFetchTs = numeric(data.quality?.forecast_fetched_at);\n\nconst forecastFresh = forecastFetchTs !== null &&\n  forecastFetchTs <= now + 5 * MINUTE &&\n  now - forecastFetchTs <= setting('FORECAST_MAX_AGE_MINUTES', 180, 30, 720) * MINUTE;\n\nconst forecastMap = new Map();\n\nif (forecastEnabled && forecastFresh && Array.isArray(data.previsions_meteo)) {\n  for (const point of data.previsions_meteo) {\n    const ts = numeric(point?.ts);\n    const temp = numeric(point?.temp);\n\n    if (\n      ts !== null &&\n      ts >= now &&\n      ts <= now + 120 * HOUR &&\n      temp !== null &&\n      temp >= -60 &&\n      temp <= 60\n    ) {\n      forecastMap.set(ts, { ts, temp });\n    }\n  }\n}\n\nconst forecastPoints = [...forecastMap.values()].sort((a, b) => a.ts - b.ts);\n\nfunction forecastPeriod(startHours, endHours, inclusiveEnd = false) {\n  const start = now + startHours * HOUR;\n  const end = now + endHours * HOUR;\n\n  const points = forecastPoints.filter(point =>\n    point.ts >= start &&\n    (inclusiveEnd || endHours === 120 ? point.ts <= end : point.ts < end)\n  );\n\n  const temperatures = points.map(point => point.temp);\n\n  const continuous =\n    points.length >= Math.max(2, Math.floor((endHours - startHours) / 3) - 1) &&\n    points[0].ts <= start + 3 * HOUR &&\n    points.at(-1).ts >= end - 3 * HOUR &&\n    points.every((point, index) =>\n      index === 0 || point.ts - points[index - 1].ts <= 3.1 * HOUR\n    );\n\n  return {\n    count: points.length,\n    complete: continuous,\n    mean: points.length\n      ? temperatures.reduce((a, b) => a + b, 0) / points.length\n      : null,\n    min: points.length ? Math.min(...temperatures) : null,\n    max: points.length ? Math.max(...temperatures) : null\n  };\n}\n\nconst forecastHorizon = setting('FORECAST_HORIZON_HOURS', 6, 6, 12);\nconst nearForecast = forecastPeriod(0, forecastHorizon, true);\nconst dayForecast = forecastPeriod(0, 24);\n\nconst forecastDays = Array.from({ length: 5 }, (_, index) => ({\n  day: index + 1,\n  from_hours: index * 24,\n  to_hours: (index + 1) * 24,\n  ...forecastPeriod(index * 24, (index + 1) * 24)\n}));\n\nconst dayWeights = [1, 0.65, 0.4, 0.25, 0.15];\nconst usableDays = forecastDays.filter(day => day.complete);\n\nconst totalWeight = usableDays.reduce(\n  (sum, day) => sum + dayWeights[day.day - 1],\n  0\n);\n\nconst forecastMean5d = totalWeight > 0\n  ? usableDays.reduce(\n      (sum, day) => sum + day.mean * dayWeights[day.day - 1],\n      0\n    ) / totalWeight\n  : null;\n\nconst forecastReady =\n  forecastEnabled &&\n  forecastFresh &&\n  nearForecast.complete &&\n  outdoor !== null;\n\nconst nearDelta = forecastReady ? nearForecast.mean - outdoor : null;\n\nconst warmingSoon =\n  forecastReady &&\n  nearForecast.min >= setting('FORECAST_MILD_MIN_C', 16, 10, 22) &&\n  (nearDelta >= 2 || nearForecast.mean >= baseComfort - 1);\n\nconst coolingSoon =\n  forecastReady &&\n  nearDelta <= -3 &&\n  nearForecast.min <= 8;\n\nlet forecastReduction = 0;\nlet forecastBoost = 0;\n\nlet forecastReason = !forecastEnabled\n  ? 'desactivees'\n  : !forecastReady\n    ? 'previsions_insuffisantes'\n    : 'maintien';\n\n// Estimate the measured trend from distinct sensor samples, not from execution count.\nconst historyWindow = setting('TREND_WINDOW_MINUTES', 120, 30, 240) * MINUTE;\n\nstate.history = (Array.isArray(state.history) ? state.history : []).filter(p =>\n  Number.isFinite(p.ts) &&\n  Number.isFinite(p.temp) &&\n  p.ts <= now + MINUTE &&\n  p.ts >= now - historyWindow\n);\n\nconst sampleTs = numeric(data.temperature_sample_ts);\n\nif (\n  insideOk &&\n  sampleTs !== null &&\n  !state.history.some(p => p.ts === sampleTs)\n) {\n  state.history.push({\n    ts: sampleTs,\n    temp: indoor,\n    window: data.window_open_detected === true\n  });\n}\n\nstate.history.sort((a, b) => a.ts - b.ts);\nstate.history = state.history.slice(-64);\n\nconst trendPoints = state.history.filter(p =>\n  !p.window && p.ts > (state.window?.lastClearedAt ?? 0)\n);\n\nlet trend = null;\n\nif (\n  trendPoints.length >= 3 &&\n  trendPoints.at(-1).ts - trendPoints[0].ts >= 30 * MINUTE\n) {\n  const meanX = trendPoints.reduce(\n    (sum, p) => sum + (p.ts - now) / HOUR,\n    0\n  ) / trendPoints.length;\n\n  const meanY = trendPoints.reduce(\n    (sum, p) => sum + p.temp,\n    0\n  ) / trendPoints.length;\n\n  let covariance = 0;\n  let variance = 0;\n\n  for (const p of trendPoints) {\n    const dx = (p.ts - now) / HOUR - meanX;\n    covariance += dx * (p.temp - meanY);\n    variance += dx * dx;\n  }\n\n  if (variance > 0) {\n    trend = clamp(covariance / variance, -2, 2);\n  }\n}\n\n// Low-order astronomical estimate.\n// Vertical-window incidence is an estimate, not measured solar heat.\nfunction solarPosition() {\n  const lat = numeric(config.Lat);\n  const lon = numeric(config.Lon);\n\n  if (\n    lat === null ||\n    lon === null ||\n    Math.abs(lat) > 90 ||\n    Math.abs(lon) > 180\n  ) {\n    return null;\n  }\n\n  const rad = Math.PI / 180;\n  const days = now / 86400000 - 10957.5;\n  const g = (357.528 + 0.9856003 * days) * rad;\n\n  const lambda = (\n    280.460 +\n    0.9856474 * days +\n    1.915 * Math.sin(g) +\n    0.020 * Math.sin(2 * g)\n  ) * rad;\n\n  const epsilon = (23.439 - 0.0000004 * days) * rad;\n\n  const alpha = Math.atan2(\n    Math.cos(epsilon) * Math.sin(lambda),\n    Math.cos(lambda)\n  );\n\n  const delta = Math.asin(Math.sin(epsilon) * Math.sin(lambda));\n\n  const h = (\n    (18.697374558 + 24.06570982441908 * days) * 15 + lon\n  ) * rad - alpha;\n\n  const phi = lat * rad;\n\n  const elevation = Math.asin(\n    Math.sin(phi) * Math.sin(delta) +\n    Math.cos(phi) * Math.cos(delta) * Math.cos(h)\n  );\n\n  const azimuth = (\n    Math.atan2(\n      Math.sin(h),\n      Math.cos(h) * Math.sin(phi) - Math.tan(delta) * Math.cos(phi)\n    ) / rad + 540\n  ) % 360;\n\n  return { elevation: elevation / rad, azimuth };\n}\n\nconst solar = solarPosition();\nconst clouds = numeric(data.nuages_pourcent);\nconst wind = numeric(data.vitesse_vent_ms);\n\nlet solarScore = 0;\n\nif (solar && clouds !== null && solar.elevation > 5) {\n  const difference = Math.abs(\n    ((solar.azimuth - setting('AZIMUTH', 285, 0, 360) + 540) % 360) - 180\n  );\n\n  if (difference <= setting('AZIMUTH_TOLERANCE', 45, 0, 90)) {\n    solarScore =\n      Math.cos(solar.elevation * Math.PI / 180) *\n      Math.cos(difference * Math.PI / 180) *\n      (1 - clamp(clouds / 100, 0, 1));\n  }\n}\n\nlet weatherCorrection = 0;\n\nif (\n  outdoor !== null &&\n  presence &&\n  !['night', 'late_night'].includes(context.phase)\n) {\n  weatherCorrection = outdoor < 8\n    ? clamp((8 - outdoor) / 20, 0, 0.5)\n    : -clamp((outdoor - 16) / 12, 0, 0.5);\n\n  if (outdoor < 8 && wind !== null) {\n    weatherCorrection += clamp((wind - 4) / 40, 0, 0.15);\n  }\n\n  weatherCorrection = clamp(weatherCorrection, -0.5, 0.5);\n}\n\nlet comfort = clamp(\n  baseComfort + weatherCorrection,\n  eco,\n  Math.min(22, maxSetpoint)\n);\n\n// Anticipation is confined to a forthcoming higher schedule target.\nconst future = localContext(\n  now + setting('PREHEAT_MINUTES', 45, 0, 90) * MINUTE\n);\n\nlet preheating = false;\n\nif (\n  insideOk &&\n  presence &&\n  future.phase !== context.phase &&\n  comfortAt(future) > baseComfort &&\n  indoor < comfortAt(future) - 0.5 &&\n  (outdoor === null || outdoor < 16)\n) {\n  comfort = clamp(comfortAt(future), eco, Math.min(22, maxSetpoint));\n  preheating = true;\n}\n\n// A measured comfort deficit or cooling room always cancels forecast savings.\nconst dayPhase = !['night', 'late_night'].includes(context.phase);\nconst gentleCoolingLimit = -0.15;\n\nconst canReduceFromForecast =\n  insideOk &&\n  !preheating &&\n  indoor >= comfort - 0.3 &&\n  (trend === null || trend >= gentleCoolingLimit);\n\nif (warmingSoon && canReduceFromForecast) {\n  const sustainedMild = forecastMean5d !== null && forecastMean5d >= 16;\n\n  const strength = clamp(\n    Math.max(nearDelta / 6, (nearForecast.mean - 16) / 6),\n    0.25,\n    1\n  );\n\n  forecastReduction =\n    setting('FORECAST_MAX_REDUCTION_C', 0.5, 0, 1) *\n    strength *\n    (sustainedMild ? 1 : 0.75);\n\n  forecastReason = 'redoux_proche_piece_assez_chaude';\n} else if (\n  coolingSoon &&\n  insideOk &&\n  presence &&\n  dayPhase &&\n  !preheating &&\n  (\n    indoor < comfort - 0.3 ||\n    (trend !== null && trend < -0.1 && indoor <= comfort + 0.2)\n  )\n) {\n  const sustainedCold = forecastMean5d !== null && forecastMean5d < 8;\n\n  forecastBoost =\n    setting('FORECAST_MAX_BOOST_C', 0.5, 0, 0.5) *\n    clamp(-nearDelta / 6, 0, 1) *\n    (sustainedCold ? 1 : 0.75);\n\n  // Keep the combined present-weather and forecast cold correction at or below +0.5 C.\n  forecastBoost = Math.min(\n    forecastBoost,\n    Math.max(0, 0.5 - Math.max(0, weatherCorrection))\n  );\n\n  const originalComfort = comfort;\n\n  comfort = clamp(\n    comfort + forecastBoost,\n    eco,\n    Math.min(22, maxSetpoint)\n  );\n\n  forecastBoost = comfort - originalComfort;\n  forecastReason = 'refroidissement_proche_besoin_mesure';\n} else if (warmingSoon && !canReduceFromForecast) {\n  forecastReason = 'redoux_annonce_mais_confort_prioritaire';\n}\n\n// ECO needs mild weather over 24 h, a warm room and a measured stable/rising trend.\n// Hysteresis uses the previous successful command, not a merely computed decision.\nconst wasForecastEco =\n  state.lastApplied?.mode === 'FORECAST_MILD_ECO' &&\n  current === eco &&\n  power === 'ON';\n\nconst forecastEco =\n  forecastReady &&\n  dayForecast.complete &&\n  nearForecast.mean >= baseComfort - 1 &&\n  dayForecast.min >= setting('FORECAST_ECO_MIN_C', 18, 16, 22) &&\n  insideOk &&\n  !preheating &&\n  trend !== null &&\n  trend >= (wasForecastEco ? -0.1 : 0) &&\n  indoor >= comfort + (wasForecastEco ? 0.1 : 0.5);\n\nconst inertia = setting('THERMAL_INERTIA', 0.9, 0, 1);\nconst reductionLimit = setting('MAX_SOLAR_REDUCTION_C', 0.5, 0, 1);\n\nconst solarReduction =\n  insideOk &&\n  indoor >= comfort - 0.3 &&\n  trend !== null &&\n  trend > 0.1\n    ? solarScore * reductionLimit * inertia\n    : 0;\n\nconst trendReduction =\n  insideOk &&\n  indoor >= comfort - 0.2 &&\n  trend !== null\n    ? clamp(trend * (20 / 60) * inertia, 0, reductionLimit)\n    : 0;\n\n// Do not count the same measured warming twice as both trend and solar heat.\nlet requested = comfort - Math.max(\n  solarReduction,\n  trendReduction,\n  forecastReduction\n);\n\nlet targetMode = preheating ? 'PREHEAT' : presence ? 'COMFORT' : 'AWAY';\nlet reason = preheating ? 'anticipation_horaire' : 'consigne_confort_stable';\n\nif (forecastReduction > 0) {\n  targetMode = 'FORECAST_REDUCED';\n  reason = forecastReason;\n} else if (forecastBoost > 0) {\n  targetMode = 'FORECAST_COLD';\n  reason = forecastReason;\n}\n\n// Window episodes use only the native Tado signal.\n// Its disappearance is not proof of physical closure.\nstate.window ??= { active: false };\n\nconst window = state.window;\nconst wasWindowActive = window.active === true;\nconst nativeWindow = data.window_open_detected;\n\nif (data.tado_api_ok && nativeWindow === true) {\n  if (!window.active) {\n    window.openedAt = now;\n    window.episodeId = `${now}`;\n  }\n\n  window.active = true;\n  window.lastPositiveAt = now;\n  window.lastKnownAt = now;\n} else if (data.tado_api_ok && nativeWindow === false) {\n  window.lastKnownAt = now;\n\n  if (\n    window.active &&\n    now - window.openedAt >= setting('WINDOW_HOLD_MINUTES', 15, 0, 60) * MINUTE\n  ) {\n    window.active = false;\n    window.lastClearedAt = now;\n  }\n} else if (\n  window.active &&\n  now - (window.lastPositiveAt ?? 0) >\n    setting('WINDOW_UNKNOWN_HOLD_MINUTES', 60, 15, 180) * MINUTE\n) {\n  window.active = false;\n  window.lastClearedAt = now;\n}\n\nconst windowActive = window.active === true;\nconst windowJustCleared = wasWindowActive && !windowActive;\nconst overheatLimit = setting('OVERHEAT_LIMIT', 22.6, 19, 30);\n\nif (insideOk) {\n  state.overheat = state.overheat\n    ? indoor > overheatLimit - 0.6\n    : indoor >= overheatLimit;\n\n  const warmThreshold = context.season === 'summer'\n    ? 20\n    : setting('HARD_SUMMER_EXT_LIMIT', 25, 18, 35);\n\n  // A forecast estimate must meet the stricter 24-hour ECO rules above.\n  // An imminent cold front also vetoes the legacy current-weather standby.\n  state.warmStandby =\n    data.quality?.weather_is_forecast_estimate !== true &&\n    !coolingSoon &&\n    outdoor !== null &&\n    (\n      state.warmStandby\n        ? outdoor >= warmThreshold - 2 && indoor >= comfort - 0.5\n        : outdoor >= warmThreshold && indoor >= comfort + 0.3\n    );\n}\n\nif (windowActive) {\n  requested = eco;\n  targetMode = 'WINDOW_OPEN_ECO';\n\n  reason = nativeWindow === true\n    ? 'ouverture_signalee_par_tado'\n    : 'temporisation_apres_signal_fenetre';\n} else if (insideOk && state.overheat) {\n  requested = eco;\n  targetMode = 'OVERHEAT_ECO';\n  reason = 'surchauffe_mesuree';\n} else if (insideOk && state.warmStandby) {\n  requested = eco;\n  targetMode = 'WARM_WEATHER_ECO';\n  reason = 'temps_doux_et_piece_deja_chaude';\n} else if (forecastEco) {\n  requested = eco;\n  targetMode = 'FORECAST_MILD_ECO';\n  reason = 'douceur_24h_et_piece_chaude_stable';\n} else if (\n  Math.max(solarReduction, trendReduction) > Math.max(0.1, forecastReduction)\n) {\n  reason = 'reduction_limitee_montee_mesuree';\n}\n\nconst legacyScriptOff = store.script_turned_it_off === true && !state.lastApplied;\n\nconst externalOff =\n  power === 'OFF' &&\n  enabled('RESPECT_MANUAL_OFF', true) &&\n  !windowActive &&\n  !windowJustCleared &&\n  !legacyScriptOff &&\n  state.lastApplied?.mode !== 'WINDOW_OPEN_ECO';\n\nlet target = quantize(requested);\n\n// A small deadband around each rounding boundary prevents alternating half-degree requests.\nif (\n  !targetMode.endsWith('_ECO') &&\n  allowed.includes(current) &&\n  power === 'ON' &&\n  target !== current\n) {\n  const boundary =\n    Math.abs(target - current) / 2 +\n    setting('SETPOINT_DEADBAND_C', 0.1, 0, 0.25);\n\n  if (Math.abs(requested - current) < boundary) {\n    target = current;\n  }\n}\n\nconst lastUpdate = numeric(state.lastApplied?.ts) ?? 0;\n\nconst urgent =\n  (\n    windowActive &&\n    (\n      state.lastApplied?.mode !== 'WINDOW_OPEN_ECO' ||\n      current !== eco ||\n      power !== 'ON'\n    )\n  ) ||\n  windowJustCleared ||\n  (insideOk && state.overheat && current !== eco) ||\n  (insideOk && indoor < 12 && !windowActive);\n\nconst delayOk =\n  now - lastUpdate >= setting('MIN_DELAY_MINUTES', 25, 0, 180) * MINUTE ||\n  urgent;\n\nconst targetChangedEnough =\n  current === null ||\n  Math.abs(target - current) >= setting('MIN_DELTA_SETPOINT', 0.5, 0.5, 2) ||\n  power === 'OFF';\n\nlet action = targetChangedEnough && delayOk ? 'UPDATE' : 'IGNORE';\n\nif (!insideOk || !['ON', 'OFF'].includes(power)) {\n  action = 'IGNORE';\n  reason = data.tado_error_code ? String(data.tado_error_code).toLowerCase() : 'mesure_interieure_ou_etat_tado_indisponible';\n  targetMode = 'DATA_UNAVAILABLE';\n} else if (externalOff) {\n  action = 'IGNORE';\n  reason = 'etat_off_externe_respecte';\n  targetMode = 'EXTERNAL_OFF_RESPECTED';\n}\n\n// Tetens vapor pressure (hPa).\n// The same equation is used for RH, dew point and ventilation advice.\nconst saturation = temperature =>\n  6.11 * 10 ** (7.5 * temperature / (237.3 + temperature));\n\nconst pressureInside = insideOk && humidityOk\n  ? saturation(indoor) * humidity / 100\n  : null;\n\nconst pressureOutside = outdoor !== null && outsideHumidity !== null\n  ? saturation(outdoor) * outsideHumidity / 100\n  : null;\n\nfunction dewPoint(pressure) {\n  if (pressure === null || pressure <= 0) return null;\n\n  const a = Math.log10(pressure / 6.11);\n  return 237.3 * a / (7.5 - a);\n}\n\nconst dewInside = dewPoint(pressureInside);\nconst dewOutside = dewPoint(pressureOutside);\n\nconst equivalentOutsideRh = insideOk && pressureOutside !== null\n  ? 100 * pressureOutside / saturation(indoor)\n  : null;\n\nconst dryingBenefit = humidityOk && equivalentOutsideRh !== null\n  ? humidity - equivalentOutsideRh\n  : null;\n\nconst effectiveVentilation =\n  dryingBenefit !== null &&\n  dryingBenefit >= setting('VENTILATION_MIN_RH_GAIN', 5, 2, 20);\n\n// This surface estimate is diagnostic only; it never raises the heating target.\nconst measuredSurface = numeric(data.temp_surface_interieure);\n\nconst surfaceTemperature = measuredSurface ?? (\n  insideOk && outdoor !== null && outdoor < indoor\n    ? outdoor + setting('SURFACE_FACTOR', 0.75, 0.3, 1) * (indoor - outdoor)\n    : null\n);\n\nconst condensationMargin =\n  dewInside !== null && surfaceTemperature !== null\n    ? surfaceTemperature - dewInside\n    : null;\n\nconst condensationRisk =\n  humidityOk &&\n  condensationMargin !== null &&\n  condensationMargin <= setting('CONDENSATION_MARGIN_C', 2, 0, 5);\n\nconst low = setting('HUMIDITY_LOW_PERCENT', 30, 15, 45);\nconst high = setting('HUMIDITY_HIGH_PERCENT', 60, 50, 80);\n\nconst criticalLow = Math.min(\n  low - 2,\n  setting('HUMIDITY_CRITICAL_LOW_PERCENT', 25, 5, 40)\n);\n\nconst criticalHigh = Math.max(\n  high + 2,\n  setting('HUMIDITY_CRITICAL_HIGH_PERCENT', 70, 55, 95)\n);\n\nconst hysteresis = setting('HUMIDITY_HYSTERESIS_PERCENT', 3, 1, 5);\n\nstate.humidity ??= {};\nconst hum = state.humidity;\n\nlet humidityStatus = 'unknown';\nlet humiditySeverity = 'none';\n\nif (humidityOk) {\n  humidityStatus = 'normal';\n\n  if (\n    humidity <= low ||\n    (hum.status === 'too_dry' && humidity < low + hysteresis)\n  ) {\n    humidityStatus = 'too_dry';\n  } else if (\n    humidity >= high ||\n    condensationRisk ||\n    (hum.status === 'too_humid' && humidity > high - hysteresis)\n  ) {\n    humidityStatus = 'too_humid';\n  }\n\n  if (humidityStatus !== 'normal') {\n    humiditySeverity = (\n      humidityStatus === 'too_dry'\n        ? humidity <= criticalLow ||\n          (\n            hum.status === 'too_dry' &&\n            hum.severity === 'critical' &&\n            humidity < criticalLow + 2\n          )\n        : humidity >= criticalHigh ||\n          (\n            hum.status === 'too_humid' &&\n            hum.severity === 'critical' &&\n            humidity > criticalHigh - 2\n          )\n    ) ? 'critical' : 'warning';\n  }\n}\n\nconst humiditySample = numeric(data.humidity_sample_ts);\nconst candidateKey = `${humidityStatus}:${humiditySeverity}`;\n\nconst gapTooLong =\n  humiditySample !== null &&\n  hum.lastSampleTs !== undefined &&\n  humiditySample - hum.lastSampleTs >\n    setting('SENSOR_MAX_AGE_MINUTES', 90, 5, 1440) * MINUTE;\n\nif (!humidityOk) {\n  hum.candidate = null;\n  hum.count = 0;\n} else if (humiditySample !== null && humiditySample !== hum.lastSampleTs) {\n  if (hum.candidate !== candidateKey || gapTooLong) {\n    hum.candidate = candidateKey;\n    hum.since = humiditySample;\n    hum.count = 1;\n  } else {\n    hum.count = (hum.count ?? 0) + 1;\n  }\n\n  hum.lastSampleTs = humiditySample;\n  hum.status = humidityStatus;\n  hum.severity = humiditySeverity;\n}\n\nconst confirmMinutes = humiditySeverity === 'critical'\n  ? setting('HUMIDITY_CRITICAL_CONFIRM_MINUTES', 5, 0, 60)\n  : setting('HUMIDITY_CONFIRM_MINUTES', 30, 0, 180);\n\nconst confirmed =\n  humidityOk &&\n  hum.candidate === candidateKey &&\n  hum.count >= 2 &&\n  humiditySample - hum.since >= confirmMinutes * MINUTE;\n\nconst extreme = humidityOk && (humidity <= 15 || humidity >= 85);\nconst abnormal = !['normal', 'unknown'].includes(humidityStatus);\n\nif (confirmed && !abnormal) {\n  hum.activeEpisode = null;\n}\n\nif (\n  abnormal &&\n  (confirmed || extreme) &&\n  (!hum.activeEpisode || hum.activeEpisode.family !== humidityStatus)\n) {\n  hum.activeEpisode = {\n    id: `${hum.since}:${humidityStatus}`,\n    family: humidityStatus\n  };\n}\n\nconst lastHumAlert = hum.lastSent ?? {};\n\nconst elapsedHumAlert = lastHumAlert.ts === undefined\n  ? Infinity\n  : now - lastHumAlert.ts;\n\nconst escalated =\n  lastHumAlert.family === humidityStatus &&\n  lastHumAlert.severity === 'warning' &&\n  humiditySeverity === 'critical';\n\nconst newEpisode = lastHumAlert.episodeId !== hum.activeEpisode?.id;\n\nconst cooldownHours = escalated\n  ? 0.5\n  : newEpisode\n    ? 2\n    : humiditySeverity === 'critical'\n      ? setting('HUMIDITY_CRITICAL_REMINDER_HOURS', 6, 1, 48)\n      : setting('HUMIDITY_REMINDER_HOURS', 12, 1, 72);\n\nconst sendHumAlert =\n  abnormal &&\n  (confirmed || extreme) &&\n  elapsedHumAlert >= cooldownHours * HOUR;\n\nconst idealRange = context.season === 'winter'\n  ? '35–50 %'\n  : context.season === 'summer'\n    ? '40–60 %'\n    : '40–55 %';\n\nfunction humidityAdvice() {\n  if (humidityStatus === 'too_dry') {\n    const outdoorAdvice = dryingBenefit !== null && dryingBenefit > 5\n      ? \"L’air extérieur assécherait encore la pièce une fois réchauffé. \"\n      : '';\n\n    return `${outdoorAdvice}Garde l’aération quotidienne et la ventilation habituelle, évite de surchauffer et surveille le taux avant d’humidifier davantage.`;\n  }\n\n  const storm = String(data.condition_meteo_main).toLowerCase() === 'thunderstorm';\n\n  if (storm || (wind !== null && wind >= 12)) {\n    return \"Orage ou vent fort : privilégie la VMC ou l’extraction ; aère brièvement quand les conditions le permettent.\";\n  }\n\n  if (nativeWindow === true && effectiveVentilation) {\n    return \"Tado signale déjà une ouverture. L’air extérieur peut assécher la pièce ; surveille la baisse d’humidité et évite de prolonger inutilement l’aération.\";\n  }\n\n  if (effectiveVentilation) {\n    const duration = outdoor <= 8 || (wind !== null && wind >= 5)\n      ? '5 à 10'\n      : 'environ 10';\n\n    const rain = ['rain', 'drizzle', 'snow'].includes(\n      String(data.condition_meteo_main).toLowerCase()\n    )\n      ? \" Choisis une ouverture abritée des précipitations.\"\n      : '';\n\n    return `Aérer ${duration} minutes peut assécher la pièce : l’air extérieur ramené à ${rounded(indoor, 1)} °C serait à environ ${rounded(equivalentOutsideRh, 0)} % HR.${rain} Garde la ventilation habituelle.`;\n  }\n\n  if (dryingBenefit === null) {\n    return \"Données extérieures insuffisantes pour conseiller une aération déshumidifiante. Garde la ventilation habituelle et vérifie les sources d’humidité.\";\n  }\n\n  return \"L’air extérieur n’est pas assez sec pour déshumidifier efficacement par une longue aération. Garde la ventilation habituelle, utilise l’extraction et vérifie les sources d’humidité ; un déshumidificateur peut aider si cela persiste.\";\n}\n\nconst alertMessage = abnormal ? [\n  humidityStatus === 'too_dry'\n    ? `🌵 Air ${humiditySeverity === 'critical' ? 'très ' : ''}sec : ${rounded(humidity, 1)} % HR.`\n    : `💧 ${condensationRisk && humidity < high ? 'Risque de condensation sur paroi froide' : humiditySeverity === 'critical' ? 'Air très humide' : 'Air humide'} : ${rounded(humidity, 1)} % HR.`,\n\n  insideOk\n    ? `Intérieur : ${rounded(indoor, 1)} °C. Repère de confort saisonnier : ${idealRange}.`\n    : `Repère de confort saisonnier : ${idealRange}.`,\n\n  condensationRisk\n    ? `Point de rosée : ${rounded(dewInside, 1)} °C ; paroi ${measuredSurface === null ? 'estimée' : 'mesurée'} à ${rounded(surfaceTemperature, 1)} °C. ${measuredSurface === null ? 'Estimation à vérifier sur place.' : ''}`\n    : '',\n\n  humidityAdvice(),\n\n  data.quality?.weather_is_forecast_estimate === true\n    ? 'Météo extérieure estimée à partir des prévisions, à confirmer sur place.'\n    : ''\n].filter(Boolean).join('\\n') : null;\n\n// Only successful Telegram acknowledgements update lastSent.\n// Failed messages remain retryable.\nconst windowReminder = setting('WINDOW_REMINDER_MINUTES', 60, 15, 360) * MINUTE;\n\nconst sendWindowAlert =\n  data.tado_api_ok === true &&\n  nativeWindow === true &&\n  (\n    window.lastSent?.episodeId !== window.episodeId ||\n    now - window.lastSent.ts >= windowReminder\n  );\n\nconst windowMessage = sendWindowAlert ? [\n  window.lastSent?.episodeId === window.episodeId\n    ? '🪟 Tado signale toujours une fenêtre ouverte.'\n    : '🪟 Tado vient de signaler une fenêtre ouverte.',\n\n  insideOk\n    ? `Intérieur : ${rounded(indoor, 1)} °C${humidityOk ? ` · Humidité : ${rounded(humidity, 1)} %` : ''}.`\n    : 'Température intérieure indisponible.',\n\n  action === 'UPDATE'\n    ? `Consigne demandée : ${target} °C, mode ON.`\n    : insideOk && current === eco && power === 'ON'\n      ? `Consigne actuelle : ${eco} °C, mode ON.`\n      : 'Vérifie le chauffage dans Tado : aucune nouvelle consigne n’a été envoyée par cette décision.',\n\n  'Vérifie la fenêtre. Tado déduit l’ouverture des variations de température/humidité ; ce signal ne remplace pas un capteur de contact.'\n].join('\\n') : null;\n\nreturn [{\n  json: {\n    ...data,\n\n    cible: target,\n    target_mode: targetMode,\n    action,\n    reason,\n    delayOk,\n    targetChangedEnough,\n\n    sendHumAlert,\n    humidity_alert_blocked_reason: sendHumAlert ? null :\n      !humidityOk ? (data.tado_error_code ?? 'MESURE_HUMIDITE_INDISPONIBLE') :\n      !abnormal ? 'HUMIDITE_DANS_LES_SEUILS' :\n      !(confirmed || extreme) ? 'CONFIRMATION_EN_ATTENTE' : 'DELAI_ENTRE_ALERTES',\n    alertMessage,\n    sendWindowAlert,\n    windowMessage,\n\n    humidity_alert_meta: sendHumAlert\n      ? {\n          ts: now,\n          family: humidityStatus,\n          severity: humiditySeverity,\n          episodeId: hum.activeEpisode.id\n        }\n      : null,\n\n    window_alert_meta: sendWindowAlert\n      ? {\n          ts: now,\n          episodeId: window.episodeId\n        }\n      : null,\n\n    debug_thermique: {\n      timezone,\n      ...context,\n      presence,\n      presence_source: typeof data.presence === 'boolean'\n        ? 'tado'\n        : 'configuration',\n\n      confort_base: rounded(baseComfort),\n      correction_meteo: rounded(weatherCorrection),\n      confort_cible: rounded(comfort),\n      consigne_avant_arrondi: rounded(requested),\n\n      tendance_deg_par_heure: rounded(trend),\n      echantillons_tendance: trendPoints.length,\n\n      anticipation_horaire: preheating,\n      fenetre_active: windowActive,\n      surchauffe: !!state.overheat,\n      temps_doux: !!state.warmStandby\n    },\n\n    debug_previsions: {\n      activees: forecastEnabled,\n      fraiches: forecastFresh,\n      utilisables: forecastReady,\n      source: data.quality?.forecast_source ?? 'unavailable',\n      temperature_exterieure_estimee:\n        data.quality?.weather_is_forecast_estimate === true,\n\n      horizon_heures: forecastHorizon,\n      nombre_creneaux: forecastPoints.length,\n\n      moyenne_prochaines_heures_c: rounded(nearForecast.mean),\n      minimum_prochaines_heures_c: rounded(nearForecast.min),\n      ecart_prochaines_heures_c: rounded(nearDelta),\n      minimum_24h_c: rounded(dayForecast.min),\n      moyenne_ponderee_5j_c: rounded(forecastMean5d),\n\n      resume_5_jours: forecastDays.map(day => ({\n        jour: day.day,\n        de_heures: day.from_hours,\n        a_heures: day.to_hours,\n        creneaux: day.count,\n        couverture_suffisante: day.complete,\n        moyenne_c: rounded(day.mean),\n        minimum_c: rounded(day.min),\n        maximum_c: rounded(day.max)\n      })),\n\n      redoux_proche: warmingSoon,\n      refroidissement_proche: coolingSoon,\n      reduction_c: rounded(forecastReduction),\n      hausse_c: rounded(forecastBoost),\n      eco_possible: forecastEco,\n      motif: forecastReason,\n      retenues_pour_decision: targetMode.startsWith('FORECAST_')\n    },\n\n    debug_solaire: {\n      elevation: rounded(solar?.elevation),\n      azimut: rounded(solar?.azimuth),\n      nuages: clouds,\n      gain_estime: rounded(solarScore),\n      reduction_solaire_c: rounded(solarReduction),\n      reduction_tendance_c: rounded(trendReduction)\n    },\n\n    debug_humidite: {\n      statut: humidityStatus,\n      severite: humiditySeverity,\n      plage_ideale: idealRange,\n\n      seuil_bas: low,\n      seuil_haut: high,\n      seuil_critique_bas: criticalLow,\n      seuil_critique_haut: criticalHigh,\n\n      point_rosee_interieur_c: rounded(dewInside),\n      point_rosee_exterieur_c: rounded(dewOutside),\n\n      humidite_absolue_interieure_g_m3: pressureInside === null\n        ? null\n        : rounded(216.7 * pressureInside / (indoor + 273.15)),\n\n      humidite_absolue_exterieure_g_m3: pressureOutside === null\n        ? null\n        : rounded(216.7 * pressureOutside / (outdoor + 273.15)),\n\n      humidite_exterieure_ramenee_interieur_percent:\n        rounded(equivalentOutsideRh),\n\n      gain_aeration_points_hr: rounded(dryingBenefit),\n      aeration_deshumidifiante: effectiveVentilation,\n\n      temperature_paroi_c: rounded(surfaceTemperature),\n      paroi_estimee: measuredSurface === null,\n      marge_condensation_c: rounded(condensationMargin),\n      risque_condensation: condensationRisk,\n\n      nombre_mesures_consecutives: hum.count ?? 0,\n      confirme: confirmed,\n      meteo: data.condition_meteo\n    }\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        432,
-        992
+        840,
+        1040
       ],
       "id": "c1688e62-54b5-5393-b565-94cbb985ec20",
       "name": "Décision chauffage"
@@ -137,8 +139,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        640,
-        784
+        1060,
+        800
       ],
       "id": "b8821e72-34e6-57e5-b3fe-bb811f70831a",
       "name": "Action = UPDATE ?"
@@ -152,7 +154,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "=Bearer {{$('Tado Refresh Token').first().json.access_token}}"
+              "value": "={{ 'Bearer ' + $('Session Tado').first().json.access_token }}"
             }
           ]
         },
@@ -162,7 +164,9 @@
         "options": {
           "response": {
             "response": {
-              "fullResponse": true
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
             }
           },
           "timeout": 20000
@@ -171,8 +175,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        864,
-        688
+        1280,
+        720
       ],
       "id": "d04d39b5-5f60-593d-847b-1e7ac8d85ab8",
       "name": "Appliquer overlay Tado",
@@ -185,21 +189,21 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1088,
-        688
+        1500,
+        720
       ],
       "id": "788bdb6a-d594-54f2-9cec-3abbc21d6268",
       "name": "Mémoriser update"
     },
     {
       "parameters": {
-        "jsCode": "return [{ json: {\n  ...$('Décision chauffage').first().json,\n  update_applied: false,\n  message: 'Aucune modification de consigne nécessaire.'\n} }];"
+        "jsCode": "const decision = $('Décision chauffage').first().json;\nreturn [{ json: {\n  ...decision,\n  update_applied: false,\n  message: decision.tado_error_message ?? (\n    decision.target_mode === 'DATA_UNAVAILABLE'\n      ? 'Mesure intérieure ou état Tado indisponible : aucune nouvelle consigne envoyée.'\n      : 'Aucune modification de consigne nécessaire.'\n  )\n} }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        976,
-        832
+        1500,
+        920
       ],
       "id": "287b48a2-a5f7-5fad-bff8-9927072e16b4",
       "name": "Aucune modification nécessaire"
@@ -211,8 +215,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1312,
-        784
+        1720,
+        800
       ],
       "id": "9c6bb9e6-3a4d-5efc-9235-cfeebfa9be7f",
       "name": "Journal décision"
@@ -224,8 +228,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -240,
-        1184
+        -260,
+        1600
       ],
       "id": "7e01883b-c3fe-5216-b033-2cbb4a000dd0",
       "name": "Demander nouveau device code"
@@ -237,8 +241,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        208,
-        1184
+        180,
+        1600
       ],
       "id": "52730d8f-b77e-5a49-a71f-805b8596bdec",
       "name": "Code in JavaScript"
@@ -282,6 +286,12 @@
               "name": "ID_Telegram",
               "value": "YOUR_ID_TELEGRAM",
               "type": "string"
+            },
+            {
+              "id": "ab24523b-b5aa-5c17-9504-01790557d9a7",
+              "name": "DIAGNOSTIC_TADO",
+              "type": "boolean",
+              "value": "={{ $json.diagnostic_tado === true }}"
             }
           ]
         },
@@ -290,11 +300,13 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        -1136,
-        1168
+        -1180,
+        1040
       ],
       "id": "ba255be7-14e4-592f-b480-56416890f8c7",
-      "name": "Configuration Tado"
+      "name": "Configuration Tado",
+      "notes": "Renseigner vos identifiants, puis exécuter Diagnostic Tado (manuel) pour vérifier HOME_ID et ZONE_ID. Choisir explicitement une pièce HEATING dans zones_disponibles ; aucune zone n’est sélectionnée automatiquement.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -317,8 +329,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        -16,
-        1184
+        -40,
+        1600
       ],
       "id": "f6e33aff-85a0-5664-b6b0-01f6399e98e3",
       "name": "HTTP Request"
@@ -586,8 +598,8 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        -912,
-        1168
+        -960,
+        1040
       ],
       "id": "ad11479c-c152-5cde-99e9-3a2d41d1d55e",
       "name": "Configuration Logement"
@@ -604,8 +616,8 @@
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        880,
-        1104
+        1280,
+        1120
       ],
       "id": "f7b3a4a5-4aff-5e5f-91e1-022cc1e43c2d",
       "name": "Send a text message",
@@ -639,8 +651,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        -464,
-        1088
+        -500,
+        1040
       ],
       "id": "f1e435b2-156f-5f32-8788-6d001f952fe8",
       "name": "Vérification Token"
@@ -673,7 +685,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        656,
+        1060,
         1120
       ],
       "id": "d01e3197-c5c2-5d88-b747-46773a914243",
@@ -686,8 +698,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1120,
-        1104
+        1500,
+        1120
       ],
       "id": "75c333c2-add7-5b65-a414-f40f5bb55997",
       "name": "Mémoriser alerte humidité"
@@ -720,8 +732,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        656,
-        1408
+        1060,
+        1380
       ],
       "id": "59f1b954-e54d-590e-aa90-421f67208f63",
       "name": "Fenêtre ouverte à signaler ?"
@@ -738,8 +750,8 @@
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        880,
-        1408
+        1280,
+        1380
       ],
       "id": "b28cfece-214f-5e16-bea9-c38f1caa5693",
       "name": "Telegram fenêtre ouverte",
@@ -752,11 +764,205 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1120,
-        1408
+        1500,
+        1380
       ],
       "id": "b237f3e0-6e72-5d48-9967-14be02c97fdc",
       "name": "Mémoriser alerte fenêtre"
+    },
+    {
+      "name": "Diagnostic Tado (manuel)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [
+        -1640,
+        560
+      ],
+      "id": "c3272045-6dfd-5a5c-a3d1-99b4ac2f0198"
+    },
+    {
+      "name": "Activer diagnostic",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3bb13c9c-1340-56bd-bf8d-8eef91f55b67",
+              "name": "diagnostic_tado",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "position": [
+        -1420,
+        560
+      ],
+      "id": "7bbbb523-15e8-51e7-b744-75868a594cfe"
+    },
+    {
+      "name": "Session Tado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "// Une seule session réussie par exécution, y compris après réautorisation.\nif ($json.auth_ok !== true || typeof $json.access_token !== 'string' || !$json.access_token.trim()) {\n  throw new Error('Session Tado indisponible : aucun access_token valide reçu.');\n}\nreturn [{ json: { auth_ok: true, access_token: $json.access_token } }];\n"
+      },
+      "position": [
+        -260,
+        800
+      ],
+      "id": "0da0e1f9-dfbf-5fb4-b121-860fdb8ac40f"
+    },
+    {
+      "name": "Mode diagnostic ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4f6057a1-f482-5e08-b02a-aebcdeb5c7d3",
+              "leftValue": "={{ $('Configuration Tado').first().json.DIAGNOSTIC_TADO }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "position": [
+        -40,
+        800
+      ],
+      "id": "f1cd4af7-f914-5610-a317-1b8d2682743b"
+    },
+    {
+      "name": "Lire compte Tado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "parameters": {
+        "url": "https://my.tado.com/api/v2/me",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Session Tado').first().json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        },
+        "method": "GET"
+      },
+      "position": [
+        180,
+        480
+      ],
+      "id": "296eb69a-2c1b-5c5c-9457-42e171aca4c8",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "name": "Lister zones Tado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "parameters": {
+        "url": "={{ 'https://my.tado.com/api/v2/homes/' + encodeURIComponent(String($('Configuration Tado').first().json.HOME_ID).trim()) + '/zones' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Session Tado').first().json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 20000
+        },
+        "method": "GET"
+      },
+      "position": [
+        400,
+        480
+      ],
+      "id": "2f2fe08f-dbb4-5de6-b709-8b74feb6a24a",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "name": "Résultat diagnostic Tado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "jsCode": "// Lecture seule : aucun changement de zone, chauffage ou envoi Telegram.\nconst config = $('Configuration Tado').first().json;\nconst homeId = String(config.HOME_ID ?? '').trim();\nconst zoneId = String(config.ZONE_ID ?? '').trim();\n\nfunction response(raw) {\n  let body = raw.body ?? raw;\n  if (typeof body === 'string') {\n    try { body = JSON.parse(body); } catch { body = {}; }\n  }\n  const status = Number(raw.statusCode ?? raw.error?.status ?? raw.error?.statusCode);\n  const headers = raw.headers ?? {};\n  const apiErrors = Array.isArray(body?.errors) ? body.errors : [];\n  return {\n    body,\n    status: Number.isFinite(status) && status > 0 ? status : null,\n    failed: !!raw.error || !!body?.error || apiErrors.length > 0 || status >= 400,\n    message: apiErrors.map(e => e.title ?? e.message ?? e.code).filter(Boolean).join(' ; ') ||\n      body?.error?.message || raw.error?.message || null,\n    rateLimit: Object.entries(headers).find(([k]) => k.toLowerCase() === 'ratelimit')?.[1] ?? null,\n  };\n}\n\nconst account = response($('Lire compte Tado').first().json);\nconst listing = response($('Lister zones Tado').first().json);\nconst homes = !account.failed && Array.isArray(account.body?.homes)\n  ? account.body.homes.map(h => ({ id: h.id, name: h.name ?? null })) : [];\nconst hasHomeList = !account.failed && Array.isArray(account.body?.homes);\nconst homeExists = hasHomeList ? homes.some(h => String(h.id) === homeId) : null;\nconst hasZoneList = !listing.failed && Array.isArray(listing.body);\nconst zones = hasZoneList\n  ? listing.body.map(z => ({ id: z.id, name: z.name ?? null, type: z.type ?? null })) : [];\nconst selected = hasZoneList ? zones.find(z => String(z.id) === zoneId) ?? null : null;\nconst heatingZone = selected?.type === 'HEATING';\n\nlet status;\nlet instruction;\nif ([account.status, listing.status].includes(401)) {\n  status = 'AUTHENTIFICATION_A_RENOUVELER';\n  instruction = 'Relancer le diagnostic complet pour obtenir un token récent.';\n} else if ([account.status, listing.status].includes(429)) {\n  status = 'QUOTA_TADO_ATTEINT';\n  instruction = 'Consulter ratelimit ; attendre le renouvellement du quota avant de relancer.';\n} else if ([account.status, listing.status].includes(403)) {\n  status = 'ACCES_REFUSE';\n  instruction = 'Vérifier les droits du compte sur le logement configuré.';\n} else if (homeExists === false) {\n  status = 'LOGEMENT_CONFIGURE_INTROUVABLE';\n  instruction = 'Dans Configuration Tado, renseigner le HOME_ID du logement voulu parmi logements_accessibles, puis relancer ce diagnostic.';\n} else if (!hasZoneList) {\n  status = 'LISTE_ZONES_INDISPONIBLE';\n  instruction = 'Consulter http_zones et erreur_zones. Vérifier le logement, les droits du compte et la compatibilité de cette API avec les appareils.';\n} else if (!selected) {\n  status = 'ZONE_CONFIGUREE_INTROUVABLE';\n  instruction = 'Dans Configuration Tado, remplacer ZONE_ID par le champ id de la pièce HEATING souhaitée dans zones_disponibles. Ne pas utiliser son rang dans la liste. Relancer le diagnostic.';\n} else if (!heatingZone) {\n  status = 'TYPE_DE_ZONE_NON_COMPATIBLE';\n  instruction = 'Ce workflow envoie des consignes HEATING. Choisir explicitement une pièce de chauffage compatible dans Configuration Tado.';\n} else {\n  status = 'ZONE_CONFIGUREE_TROUVEE';\n  instruction = 'La pièce configurée existe et est de type HEATING. Ce diagnostic ne vérifie pas encore ses mesures : vérifier la prochaine lecture de Lire état zone Tado. Publier le workflow corrigé pour reprendre les contrôles planifiés et les confirmations d’humidité.';\n}\n\nreturn [{ json: {\n  diagnostic_uniquement: true,\n  statut: status,\n  configuration_verifiee: { HOME_ID: homeId, ZONE_ID: zoneId },\n  logement_configure_present: homeExists,\n  zone_configuree_presente: hasZoneList ? selected !== null : null,\n  zone_selectionnee: selected,\n  logements_accessibles: homes,\n  zones_disponibles: zones,\n  http_compte: account.status,\n  http_zones: listing.status,\n  erreur_compte: account.message,\n  erreur_zones: listing.message,\n  ratelimit: listing.rateLimit ?? account.rateLimit,\n  instruction,\n} }];\n"
+      },
+      "position": [
+        620,
+        480
+      ],
+      "id": "bb4bb25e-b34d-53ac-9b64-9695a7d1151b"
+    },
+    {
+      "name": "Mode d’emploi",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "parameters": {
+        "content": "## Diagnostic de la zone Tado\n1. Importer ce fichier. Vérifier les identifiants Telegram et OpenWeatherMap si n8n les demande.\n2. Exécuter le workflow avec le déclencheur **Diagnostic Tado (manuel)**.\n3. Ouvrir **Résultat diagnostic Tado** : logements_accessibles et zones_disponibles.\n4. Dans **Configuration Tado**, corriger HOME_ID si nécessaire puis ZONE_ID avec l’id de la pièce HEATING voulue. Les identifiants publics sont des valeurs à remplacer. Choisir explicitement la pièce HEATING souhaitée ; aucune zone n’est sélectionnée automatiquement.\n5. Relancer le diagnostic. ZONE_CONFIGUREE_TROUVEE confirme seulement l’existence de la pièce.\n6. Publier/activer cette version pour les contrôles toutes les 30 minutes. Si elle remplace un autre workflow actif, désactiver l’ancien pour éviter deux contrôleurs.\n\nL’exécution manuelle fait uniquement le diagnostic. Les appels /me et /zones ne sont pas ajoutés aux contrôles planifiés. Aucune consigne ni notification Telegram n’est envoyée par la branche de diagnostic.\n",
+        "height": 580,
+        "width": 840,
+        "color": 5
+      },
+      "position": [
+        -1660,
+        -100
+      ],
+      "id": "d6ab80bd-1144-5997-a84d-62f03d59e158"
+    },
+    {
+      "name": "Comprendre les alertes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "parameters": {
+        "content": "## Humidité et erreurs Tado\nLes seuils et calculs existants sont conservés : ≥60 % ou ≤30 %, confirmation par deux mesures distinctes couvrant 30 min ; seuils critiques ≥70 % ou ≤25 % avec confirmation de 5 min, au rythme des contrôles. Les valeurs extrêmes ≥85 % ou ≤15 % contournent la confirmation, avec le délai entre alertes toujours respecté.\n\nUne erreur 404 produit **TADO_ZONE_INTROUVABLE**, des mesures intérieures null et aucune nouvelle consigne. Un refresh token ne corrige pas HOME_ID/ZONE_ID. Consulter tado_error_message et humidity_alert_blocked_reason dans Décision chauffage.\n\nLes confirmations et rappels utilisent la mémoire du workflow. Les données statiques des exécutions manuelles n’étant pas persistées par n8n, valider la reprise des alertes sur les exécutions planifiées du workflow publié. Le système Tado garde son fonctionnement propre lorsqu’aucune nouvelle consigne n’est envoyée.\n\nRéférence fournie : https://help.tado.com/en/collections/15124268-rest-api\n",
+        "height": 590,
+        "width": 780,
+        "color": 4
+      },
+      "position": [
+        960,
+        40
+      ],
+      "id": "7f09f57a-43e5-57dd-8559-ee3a5b9491d7"
     }
   ],
   "connections": {
@@ -913,7 +1119,7 @@
       "main": [
         [
           {
-            "node": "Tado Refresh Token",
+            "node": "Vérification Token",
             "type": "main",
             "index": 0
           }
@@ -946,7 +1152,7 @@
       "main": [
         [
           {
-            "node": "Lire état zone Tado",
+            "node": "Session Tado",
             "type": "main",
             "index": 0
           }
@@ -998,6 +1204,79 @@
         [
           {
             "node": "Mémoriser alerte fenêtre",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diagnostic Tado (manuel)": {
+      "main": [
+        [
+          {
+            "node": "Activer diagnostic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Activer diagnostic": {
+      "main": [
+        [
+          {
+            "node": "Configuration Tado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session Tado": {
+      "main": [
+        [
+          {
+            "node": "Mode diagnostic ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mode diagnostic ?": {
+      "main": [
+        [
+          {
+            "node": "Lire compte Tado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lire état zone Tado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lire compte Tado": {
+      "main": [
+        [
+          {
+            "node": "Lister zones Tado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lister zones Tado": {
+      "main": [
+        [
+          {
+            "node": "Résultat diagnostic Tado",
             "type": "main",
             "index": 0
           }
